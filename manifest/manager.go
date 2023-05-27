@@ -17,7 +17,6 @@ import (
 	"github.com/akash-network/node/sdl"
 	sdlutil "github.com/akash-network/node/sdl/util"
 	"github.com/akash-network/node/util/runner"
-	"github.com/akash-network/node/validation"
 	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
 	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 
@@ -432,13 +431,13 @@ func (m *manager) validateRequest(req manifestRequest) error {
 		return ErrManifestVersion
 	}
 
-	if err = validation.ValidateManifest(req.value.Manifest); err != nil {
-		return err
-	}
+	// if err = validation.ValidateManifest(req.value.Manifest); err != nil {
+	// 	return err
+	// }
 
-	if err = validation.ValidateManifestWithDeployment(&req.value.Manifest, m.data.Groups); err != nil {
-		return err
-	}
+	// if err = validation.ValidateManifestWithDeployment(&req.value.Manifest, m.data.Groups); err != nil {
+	// 	return err
+	// }
 
 	groupNames := make([]string, 0)
 
