@@ -29,7 +29,6 @@ import (
 
 	manifest "github.com/akash-network/node/manifest/v2beta1"
 	"github.com/akash-network/node/util/wsutil"
-	manifestValidation "github.com/akash-network/node/validation"
 	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
 	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 
@@ -560,17 +559,17 @@ func createManifestHandler(log log.Logger, mclient pmanifest.Client) http.Handle
 		subctx, cancel := context.WithTimeout(req.Context(), manifestSubmitTimeout)
 		defer cancel()
 		if err := mclient.Submit(subctx, requestDeploymentID(req), mani); err != nil {
-			if errors.Is(err, manifestValidation.ErrInvalidManifest) {
-				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-				return
-			}
+			// if errors.Is(err, manifestValidation.ErrInvalidManifest) {
+			// 	http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			// 	return
+			// }
 			if errors.Is(err, pmanifest.ErrNoLeaseForDeployment) {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			log.Error("manifest submit failed", "err", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			// log.Error("manifest submit failed", "err", err)
+			// http.Error(w, err.Error(), http.StatusInternalServerError)
+			// return
 		}
 	}
 }
