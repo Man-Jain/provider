@@ -302,6 +302,7 @@ loop:
 
 				key := ev.LeaseID
 				if manager := s.managers[key]; manager != nil {
+					s.inventory.reserve(ev.LeaseID.OrderID(), mgroup)
 					if err := manager.update(mgroup); err != nil {
 						s.log.Error("updating deployment", "err", err, "lease", ev.LeaseID, "group-name", mgroup.Name)
 					}
