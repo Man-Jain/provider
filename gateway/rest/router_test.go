@@ -19,24 +19,24 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/version"
 
+	manifestValidation "github.com/akash-network/akash-api/go/manifest/v2beta2"
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
+	types "github.com/akash-network/akash-api/go/node/market/v1beta3"
 	qmock "github.com/akash-network/node/client/mocks"
 	"github.com/akash-network/node/sdl"
 	"github.com/akash-network/node/testutil"
-	manifestValidation "github.com/akash-network/node/validation"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
-	types "github.com/akash-network/node/x/market/types/v1beta2"
 
 	"github.com/akash-network/provider"
 	kubeclienterrors "github.com/akash-network/provider/cluster/kube/errors"
 	pcmock "github.com/akash-network/provider/cluster/mocks"
 	"github.com/akash-network/provider/cluster/operatorclients"
-	clustertypes "github.com/akash-network/provider/cluster/types/v1beta2"
-	ctypes "github.com/akash-network/provider/cluster/types/v1beta2"
+	clustertypes "github.com/akash-network/provider/cluster/types/v1beta3"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	"github.com/akash-network/provider/gateway/utils"
 	pmmock "github.com/akash-network/provider/manifest/mocks"
 	pmock "github.com/akash-network/provider/mocks"
-	"github.com/akash-network/provider/pkg/apis/akash.network/v2beta1"
+	"github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 )
 
 const (
@@ -67,7 +67,7 @@ type routerTest struct {
 	qclient        *qmock.QueryClient
 	clusterService *pcmock.Service
 	hostnameClient *pcmock.HostnameServiceClient
-	gclient        *client
+	gwclient       *client
 	ccert          testutil.TestCertificate
 	pcert          testutil.TestCertificate
 	host           *url.URL
@@ -112,7 +112,7 @@ func runRouterTest(t *testing.T, authClient bool, fn func(*routerTest)) {
 		require.NoError(t, err)
 		require.NotNil(t, gclient)
 
-		mf.gclient = gclient.(*client)
+		mf.gwclient = gclient.(*client)
 
 		fn(mf)
 	})
@@ -123,7 +123,7 @@ func testCertHelper(t *testing.T, test *routerTest) {
 		"Submit",
 		mock.Anything,
 		mock.AnythingOfType("types.DeploymentID"),
-		mock.AnythingOfType("v2beta1.Manifest"),
+		mock.AnythingOfType("v2beta2.Manifest"),
 	).Return(nil)
 
 	dseq := uint64(testutil.RandRangeInt(1, 1000))
@@ -145,7 +145,7 @@ func testCertHelper(t *testing.T, test *routerTest) {
 
 	req.Header.Set("Content-Type", contentTypeJSON)
 
-	_, err = test.gclient.hclient.Do(req)
+	_, err = test.gwclient.hclient.Do(req)
 	require.Error(t, err)
 	// return error message looks like
 	// Put "https://127.0.0.1:58536/deployment/652/manifest": tls: unable to verify certificate: x509: cannot validate certificate for 127.0.0.1 because it doesn't contain any IP SANs
@@ -181,7 +181,7 @@ func TestRouteNotActiveClientCert(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, gclient)
 
-		mf.gclient = gclient.(*client)
+		mf.gwclient = gclient.(*client)
 
 		testCertHelper(t, mf)
 	})
@@ -217,7 +217,7 @@ func TestRouteExpiredClientCert(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, gclient)
 
-		mf.gclient = gclient.(*client)
+		mf.gwclient = gclient.(*client)
 
 		testCertHelper(t, mf)
 	})
@@ -256,7 +256,7 @@ func TestRouteNotActiveServerCert(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, gclient)
 
-		mf.gclient = gclient.(*client)
+		mf.gwclient = gclient.(*client)
 
 		testCertHelper(t, mf)
 	})
@@ -296,7 +296,7 @@ func TestRouteExpiredServerCert(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, gclient)
 
-		mf.gclient = gclient.(*client)
+		mf.gwclient = gclient.(*client)
 
 		testCertHelper(t, mf)
 	})
@@ -312,9 +312,9 @@ func TestRouteDoesNotExist(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusNotFound)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
 }
 
@@ -356,9 +356,9 @@ func TestRouteVersionOK(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusOK)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 		var data versionInfo
 		decoder := json.NewDecoder(resp.Body)
 		err = decoder.Decode(&data)
@@ -389,9 +389,9 @@ func TestRouteStatusOK(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusOK)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 		data := make(map[string]interface{})
 		decoder := json.NewDecoder(resp.Body)
 		err = decoder.Decode(&data)
@@ -413,9 +413,9 @@ func TestRouteStatusFails(t *testing.T) {
 		require.NoError(t, err)
 
 		req.Header.Set("Content-Type", contentTypeJSON)
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusInternalServerError)
+		require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 
 		data, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
@@ -424,12 +424,12 @@ func TestRouteStatusFails(t *testing.T) {
 }
 
 func TestRouteValidateOK(t *testing.T) {
-	runRouterTest(t, false, func(test *routerTest) {
+	runRouterTest(t, true, func(test *routerTest) {
 		validate := provider.ValidateGroupSpecResult{
 			MinBidPrice: testutil.AkashDecCoin(t, 200),
 		}
 
-		test.pclient.On("Validate", mock.Anything, mock.Anything).Return(validate, nil)
+		test.pclient.On("Validate", mock.Anything, mock.Anything, mock.Anything).Return(validate, nil)
 
 		uri, err := makeURI(test.host, validatePath())
 		require.NoError(t, err)
@@ -443,9 +443,9 @@ func TestRouteValidateOK(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusOK)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 		data := make(map[string]interface{})
 		decoder := json.NewDecoder(resp.Body)
 		err = decoder.Decode(&data)
@@ -453,9 +453,13 @@ func TestRouteValidateOK(t *testing.T) {
 	})
 }
 
-func TestRouteValidateFails(t *testing.T) {
+func TestRouteValidateUnauthorized(t *testing.T) {
 	runRouterTest(t, false, func(test *routerTest) {
-		test.pclient.On("Validate", mock.Anything, mock.Anything).Return(provider.ValidateGroupSpecResult{}, errGeneric)
+		validate := provider.ValidateGroupSpecResult{
+			MinBidPrice: testutil.AkashDecCoin(t, 200),
+		}
+
+		test.pclient.On("Validate", mock.Anything, mock.Anything, mock.Anything).Return(validate, nil)
 
 		uri, err := makeURI(test.host, validatePath())
 		require.NoError(t, err)
@@ -468,9 +472,31 @@ func TestRouteValidateFails(t *testing.T) {
 		require.NoError(t, err)
 
 		req.Header.Set("Content-Type", contentTypeJSON)
-		resp, err := test.gclient.hclient.Do(req)
+
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusInternalServerError)
+		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+}
+
+func TestRouteValidateFails(t *testing.T) {
+	runRouterTest(t, true, func(test *routerTest) {
+		test.pclient.On("Validate", mock.Anything, mock.Anything, mock.Anything).Return(provider.ValidateGroupSpecResult{}, errGeneric)
+
+		uri, err := makeURI(test.host, validatePath())
+		require.NoError(t, err)
+
+		gspec := testutil.GroupSpec(t)
+		bgspec, err := json.Marshal(&gspec)
+		require.NoError(t, err)
+
+		req, err := http.NewRequest("GET", uri, bytes.NewReader(bgspec))
+		require.NoError(t, err)
+
+		req.Header.Set("Content-Type", contentTypeJSON)
+		resp, err := test.gwclient.hclient.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 
 		data, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
@@ -479,7 +505,7 @@ func TestRouteValidateFails(t *testing.T) {
 }
 
 func TestRouteValidateFailsEmptyBody(t *testing.T) {
-	runRouterTest(t, false, func(test *routerTest) {
+	runRouterTest(t, true, func(test *routerTest) {
 		test.pclient.On("Validate", mock.Anything, mock.Anything).Return(provider.ValidateGroupSpecResult{}, errGeneric)
 
 		uri, err := makeURI(test.host, validatePath())
@@ -489,9 +515,9 @@ func TestRouteValidateFailsEmptyBody(t *testing.T) {
 		require.NoError(t, err)
 
 		req.Header.Set("Content-Type", contentTypeJSON)
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusBadRequest)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
 		data, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
@@ -509,7 +535,7 @@ func TestRoutePutManifestOK(t *testing.T) {
 				Owner: test.caddr.String(),
 				DSeq:  dseq,
 			},
-			mock.AnythingOfType("v2beta1.Manifest"),
+			mock.AnythingOfType("v2beta2.Manifest"),
 		).Return(nil)
 
 		uri, err := makeURI(test.host, submitManifestPath(dseq))
@@ -529,9 +555,9 @@ func TestRoutePutManifestOK(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusOK)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 
 		data, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
@@ -550,7 +576,7 @@ func TestRoutePutInvalidManifest(t *testing.T) {
 				DSeq:  dseq,
 			},
 
-			mock.AnythingOfType("v2beta1.Manifest"),
+			mock.AnythingOfType("v2beta2.Manifest"),
 		).Return(manifestValidation.ErrInvalidManifest)
 
 		uri, err := makeURI(test.host, submitManifestPath(dseq))
@@ -570,9 +596,9 @@ func TestRoutePutInvalidManifest(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusUnprocessableEntity)
+		require.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
 
 		data, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
@@ -594,30 +620,32 @@ func mockManifestGroupsForRouterTest(rt *routerTest, leaseID mtypes.LeaseID) {
 		AvailableReplicas:  0,
 	}
 	rt.pcclient.On("LeaseStatus", mock.Anything, leaseID).Return(status, nil)
-	rt.pcclient.On("GetManifestGroup", mock.Anything, leaseID).Return(true, v2beta1.ManifestGroup{
+	rt.pcclient.On("GetManifestGroup", mock.Anything, leaseID).Return(true, v2beta2.ManifestGroup{
 		Name: testGroupName,
-		Services: []v2beta1.ManifestService{{
+		Services: []v2beta2.ManifestService{{
 			Name:  testServiceName,
 			Image: testImageName,
 			Args:  nil,
 			Env:   nil,
-			Resources: v2beta1.ResourceUnits{
+			Resources: v2beta2.Resources{
 				CPU:    1000,
 				Memory: "3333",
-				Storage: []v2beta1.ManifestServiceStorage{{
-					Name: "",
-					Size: "4444",
-				}},
+				Storage: []v2beta2.ResourcesStorage{
+					{
+						Name: "",
+						Size: "4444",
+					},
+				},
 			},
 			Count: 1,
-			Expose: []v2beta1.ManifestServiceExpose{{
+			Expose: []v2beta2.ManifestServiceExpose{{
 				Port:         8080,
 				ExternalPort: 80,
 				Proto:        "TCP",
 				Service:      testServiceName,
 				Global:       true,
 				Hosts:        []string{"hello.localhost"},
-				HTTPOptions: v2beta1.ManifestServiceExposeHTTPOptions{
+				HTTPOptions: v2beta2.ManifestServiceExposeHTTPOptions{
 					MaxBodySize: 1,
 					ReadTimeout: 2,
 					SendTimeout: 3,
@@ -657,9 +685,9 @@ func TestRouteLeaseStatusOk(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusOK)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 
 		data := make(map[string]interface{})
 		dec := json.NewDecoder(resp.Body)
@@ -705,9 +733,9 @@ func TestRouteLeaseNotInKubernetes(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
-		require.Equal(t, resp.StatusCode, http.StatusNotFound)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
 }
 
@@ -727,10 +755,10 @@ func TestRouteLeaseStatusErr(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
 
-		require.Equal(t, resp.StatusCode, http.StatusInternalServerError)
+		require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 		data, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Regexp(t, "^generic test error(?s:.)*$", string(data))
@@ -777,10 +805,10 @@ func TestRouteServiceStatusOK(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
 
-		require.Equal(t, resp.StatusCode, http.StatusOK)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 		data := make(map[string]interface{})
 		dec := json.NewDecoder(resp.Body)
 		err = dec.Decode(&data)
@@ -817,10 +845,10 @@ func TestRouteServiceStatusNoDeployment(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
 
-		require.Equal(t, resp.StatusCode, http.StatusNotFound)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 		data, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Regexp(t, "^kube: no deployment(?s:.)*$", string(data))
@@ -868,10 +896,10 @@ func TestRouteServiceStatusKubernetesNotFound(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
 
-		require.Equal(t, resp.StatusCode, http.StatusNotFound)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 		data, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Regexp(t, "^fake error(?s:.)*$", string(data))
@@ -907,10 +935,10 @@ func TestRouteServiceStatusError(t *testing.T) {
 
 		req.Header.Set("Content-Type", contentTypeJSON)
 
-		resp, err := test.gclient.hclient.Do(req)
+		resp, err := test.gwclient.hclient.Do(req)
 		require.NoError(t, err)
 
-		require.Equal(t, resp.StatusCode, http.StatusInternalServerError)
+		require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 		data, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Regexp(t, "^generic test error(?s:.)*$", string(data))

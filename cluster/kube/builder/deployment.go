@@ -1,13 +1,9 @@
 package builder
 
 import (
-	"github.com/tendermint/tendermint/libs/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	manitypes "github.com/akash-network/node/manifest/v2beta1"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 )
 
 type Deployment interface {
@@ -17,25 +13,23 @@ type Deployment interface {
 }
 
 type deployment struct {
-	workload
+	Workload
 }
 
 var _ Deployment = (*deployment)(nil)
 
-func NewDeployment(log log.Logger, settings Settings, lid mtypes.LeaseID, group *manitypes.Group, service *manitypes.Service) Deployment {
-	return &deployment{
-		workload: newWorkloadBuilder(log, settings, lid, group, service),
+func NewDeployment(workload Workload) Deployment {
+	ss := &deployment{
+		Workload: workload,
 	}
+
+	ss.Workload.log = ss.Workload.log.With("object", "deployment", "service-name", ss.deployment.ManifestGroup().Services[ss.serviceIdx].Name)
+
+	return ss
 }
 
 func (b *deployment) Create() (*appsv1.Deployment, error) { // nolint:golint,unparam
-	replicas := int32(b.service.Count)
 	falseValue := false
-
-	var effectiveRuntimeClassName *string
-	if len(b.runtimeClassName) != 0 && b.runtimeClassName != runtimeClassNoneValue {
-		effectiveRuntimeClassName = &b.runtimeClassName
-	}
 
 	kdeployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -46,13 +40,14 @@ func (b *deployment) Create() (*appsv1.Deployment, error) { // nolint:golint,unp
 			Selector: &metav1.LabelSelector{
 				MatchLabels: b.labels(),
 			},
-			Replicas: &replicas,
+			Replicas: b.replicas(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: b.labels(),
 				},
 				Spec: corev1.PodSpec{
-					RuntimeClassName: effectiveRuntimeClassName,
+					Affinity:         b.affinity(),
+					RuntimeClassName: b.runtimeClass(),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &falseValue,
 					},
@@ -68,11 +63,12 @@ func (b *deployment) Create() (*appsv1.Deployment, error) { // nolint:golint,unp
 }
 
 func (b *deployment) Update(obj *appsv1.Deployment) (*appsv1.Deployment, error) { // nolint:golint,unparam
-	replicas := int32(b.service.Count)
 	obj.Labels = b.labels()
 	obj.Spec.Selector.MatchLabels = b.labels()
-	obj.Spec.Replicas = &replicas
+	obj.Spec.Replicas = b.replicas()
 	obj.Spec.Template.Labels = b.labels()
+	obj.Spec.Template.Spec.Affinity = b.affinity()
+	obj.Spec.Template.Spec.RuntimeClassName = b.runtimeClass()
 	obj.Spec.Template.Spec.Containers = []corev1.Container{b.container()}
 	obj.Spec.Template.Spec.ImagePullSecrets = b.imagePullSecrets()
 

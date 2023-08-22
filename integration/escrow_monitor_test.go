@@ -10,11 +10,11 @@ import (
 	"github.com/cosmos/cosmos-sdk/client/flags"
 	"github.com/stretchr/testify/assert"
 
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
 	clitestutil "github.com/akash-network/node/testutil/cli"
 	deploycli "github.com/akash-network/node/x/deployment/client/cli"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
 	mcli "github.com/akash-network/node/x/market/client/cli"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 
 	providerCmd "github.com/akash-network/provider/cmd/provider-services/cmd"
 	ptestutil "github.com/akash-network/provider/testutil/provider"
@@ -39,7 +39,7 @@ func (s *E2EEscrowMonitor) TestE2EEscrowMonitor() {
 		s.validator.ClientCtx,
 		s.keyTenant.GetAddress(),
 		deploymentPath,
-		cliGlobalFlags(deploymentDeposit,
+		cliGlobalFlags(deploymentUAktDeposit,
 			fmt.Sprintf("--dseq=%v", deploymentID.DSeq))...,
 	)
 	s.Require().NoError(err)

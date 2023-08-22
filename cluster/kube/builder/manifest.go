@@ -3,10 +3,7 @@ package builder
 import (
 	"github.com/tendermint/tendermint/libs/log"
 
-	manitypes "github.com/akash-network/node/manifest/v2beta1"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
-
-	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta1"
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 )
 
 type Manifest interface {
@@ -25,25 +22,23 @@ type manifest struct {
 
 var _ Manifest = (*manifest)(nil)
 
-func BuildManifest(log log.Logger, settings Settings, ns string, lid mtypes.LeaseID, group *manitypes.Group) Manifest {
+func BuildManifest(log log.Logger, settings Settings, ns string, deployment IClusterDeployment) Manifest {
 	return &manifest{
 		builder: builder{
-			log:      log.With("module", "kube-builder"),
-			settings: settings,
-			lid:      lid,
-			group:    group,
+			log:        log.With("module", "kube-builder"),
+			settings:   settings,
+			deployment: deployment,
 		},
 		mns: ns,
 	}
 }
 
 func (b *manifest) labels() map[string]string {
-	return AppendLeaseLabels(b.lid, b.builder.labels())
+	return AppendLeaseLabels(b.deployment.LeaseID(), b.builder.labels())
 }
 
 func (b *manifest) Create() (*crd.Manifest, error) {
-
-	obj, err := crd.NewManifest(b.mns, b.lid, b.group)
+	obj, err := crd.NewManifest(b.mns, b.deployment.LeaseID(), b.deployment.ManifestGroup(), b.deployment.ClusterParams())
 
 	if err != nil {
 		return nil, err
@@ -53,7 +48,7 @@ func (b *manifest) Create() (*crd.Manifest, error) {
 }
 
 func (b *manifest) Update(obj *crd.Manifest) (*crd.Manifest, error) {
-	m, err := crd.NewManifest(b.mns, b.lid, b.group)
+	m, err := crd.NewManifest(b.mns, b.deployment.LeaseID(), b.deployment.ManifestGroup(), b.deployment.ClusterParams())
 	if err != nil {
 		return nil, err
 	}

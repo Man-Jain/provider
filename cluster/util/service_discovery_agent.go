@@ -4,17 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
+	"net"
+	"time"
+
 	"github.com/akash-network/node/util/runner"
 	"github.com/boz/go-lifecycle"
-	"github.com/desertbit/timer"
 	"github.com/tendermint/tendermint/libs/log"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"math/rand"
-	"net"
-	"time"
 )
 
 var (
@@ -67,7 +67,7 @@ func (sda *serviceDiscoveryAgent) run() {
 	defer sda.lc.ShutdownCompleted()
 
 	const retryInterval = time.Second * 2
-	retryTimer := timer.NewTimer(retryInterval)
+	retryTimer := time.NewTimer(retryInterval)
 	retryTimer.Stop()
 	defer retryTimer.Stop()
 	var discoveryResult <-chan runner.Result
@@ -87,6 +87,9 @@ mainLoop:
 			err := result.Error()
 			if err != nil {
 				sda.setResult(nil, err)
+				if !retryTimer.Stop() {
+					<-retryTimer.C
+				}
 				retryTimer.Reset(retryInterval)
 				break
 			}

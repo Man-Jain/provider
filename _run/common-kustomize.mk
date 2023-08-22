@@ -1,5 +1,5 @@
 KUSTOMIZE_ROOT                 ?= $(AP_ROOT)/_docs/kustomize
-KUSTOMIZE_DIR                  := $(DEVCACHE_RUN)/$(KIND_NAME)/kustomize
+KUSTOMIZE_DIR                  := $(DEVCACHE_RUN)/$(AP_RUN_NAME)/kustomize
 KUSTOMIZE_PROVIDER             := $(KUSTOMIZE_DIR)/akash-provider
 KUSTOMIZE_AKASH                := $(KUSTOMIZE_DIR)/akash-node
 KUSTOMIZE_OPERATOR_HOSTNAME    := $(KUSTOMIZE_DIR)/akash-operator-hostname
@@ -7,6 +7,8 @@ KUSTOMIZE_OPERATOR_INVENTORY   := $(KUSTOMIZE_DIR)/akash-operator-inventory
 KUSTOMIZE_OPERATOR_IP          := $(KUSTOMIZE_DIR)/akash-operator-ip
 
 CLIENT_EXPORT_PASSWORD         ?= 12345678
+
+SETUP_KUBE                     := $(ROOT_DIR)/script/setup-kube.sh
 
 $(KUSTOMIZE_DIR):
 	mkdir -p $(KUSTOMIZE_DIR)
@@ -22,23 +24,22 @@ kustomize-templates: $(patsubst %, kustomize-template-%,$(KUSTOMIZE_INSTALLS))
 kustomize-template-%:
 	cp -r $(ROOT_DIR)/_docs/kustomize/templates/$* $(KUSTOMIZE_DIR)/
 
-
 #### Kustomize configure images
 .PHONY: kustomize-set-images
 kustomize-set-images: $(patsubst %, kustomize-set-image-%,$(KUSTOMIZE_INSTALLS))
 
 .PHONY: kustomize-set-image-akash-node
 kustomize-set-image-akash-node:
-	echo "- op: replace\n  path: /spec/template/spec/containers/0/image\n  value: $(AKASH_DOCKER_IMAGE)" > $(KUSTOMIZE_DIR)/akash-node/docker-image.yaml
+	$(SETUP_KUBE) kustomize image "containers/0" "$(AKASH_DOCKER_IMAGE)" > "$(KUSTOMIZE_DIR)/akash-node/docker-image.yaml"
 
 .PHONY: kustomize-set-image-akash-provider
 kustomize-set-image-akash-provider:
-	echo "- op: replace\n  path: /spec/template/spec/initContainers/0/image\n  value: $(AKASH_DOCKER_IMAGE)" > $(KUSTOMIZE_DIR)/akash-provider/docker-image.yaml
-	echo "- op: replace\n  path: /spec/template/spec/containers/0/image\n  value: $(DOCKER_IMAGE)" >> $(KUSTOMIZE_DIR)/akash-provider/docker-image.yaml
+	$(SETUP_KUBE) kustomize image "initContainers/0" "$(AKASH_DOCKER_IMAGE)" > "$(KUSTOMIZE_DIR)/akash-provider/docker-image.yaml"
+	$(SETUP_KUBE) kustomize image "containers/0" "$(DOCKER_IMAGE)" >> "$(KUSTOMIZE_DIR)/akash-provider/docker-image.yaml"
 
 .PHONY: kustomize-set-image-akash-operator-%
 kustomize-set-image-akash-operator-%:
-	echo "- op: replace\n  path: /spec/template/spec/containers/0/image\n  value: $(DOCKER_IMAGE)" > "$(KUSTOMIZE_DIR)/akash-operator-$*/docker-image.yaml"
+	$(SETUP_KUBE) kustomize image "containers/0" "$(DOCKER_IMAGE)" > "$(KUSTOMIZE_DIR)/akash-operator-$*/docker-image.yaml"
 
 #### Kustomize configurations
 .PHONY: kustomize-configure-services
@@ -65,7 +66,7 @@ kustomize-configure-akash-operator-hostname:
 
 .PHONY: kustomize-configure-akash-operator-ip
 kustomize-configure-akash-operator-ip: akash-init
-	echo "provider-address=$(PROVIDER_ADDRESS)\n" > "$(KUSTOMIZE_DIR)/akash-operator-ip/configmap.yaml"
+	echo -e "provider-address=$(PROVIDER_ADDRESS)" > "$(KUSTOMIZE_DIR)/akash-operator-ip/configmap.yaml"
 
 .PHONY: kustomize-configure-akash-operator-inventory
 kustomize-configure-configure-operator-inventory:

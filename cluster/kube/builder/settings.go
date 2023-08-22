@@ -6,7 +6,7 @@ import (
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 
-	validation_util "github.com/akash-network/node/util/validation"
+	vutil "github.com/akash-network/node/util/validation"
 )
 
 // Settings configures k8s object generation such that it is customized to the
@@ -35,6 +35,7 @@ type Settings struct {
 	NetworkPoliciesEnabled bool
 
 	CPUCommitLevel     float64
+	GPUCommitLevel     float64
 	MemoryCommitLevel  float64
 	StorageCommitLevel float64
 
@@ -52,7 +53,7 @@ func ValidateSettings(settings Settings) error {
 			return errors.Wrap(ErrSettingsValidation, "empty ingress domain")
 		}
 
-		if !validation_util.IsDomainName(settings.DeploymentIngressDomain) {
+		if !vutil.IsDomainName(settings.DeploymentIngressDomain) {
 			return fmt.Errorf("%w: invalid domain name %q", ErrSettingsValidation, settings.DeploymentIngressDomain)
 		}
 	}

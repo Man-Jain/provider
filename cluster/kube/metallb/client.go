@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 
-	manifest "github.com/akash-network/node/manifest/v2beta1"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 	"github.com/prometheus/common/expfmt"
 	"github.com/tendermint/tendermint/libs/log"
 	corev1 "k8s.io/api/core/v1"
@@ -25,13 +23,15 @@ import (
 	"k8s.io/client-go/tools/pager"
 	"k8s.io/client-go/util/flowcontrol"
 
+	manifest "github.com/akash-network/akash-api/go/manifest/v2beta2"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
+
 	"github.com/akash-network/provider/cluster/kube/builder"
 	"github.com/akash-network/provider/cluster/kube/clientcommon"
-	"github.com/akash-network/provider/cluster/types/v1beta2"
-	ctypes "github.com/akash-network/provider/cluster/types/v1beta2"
-	clusterutil "github.com/akash-network/provider/cluster/util"
-
 	kubeclienterrors "github.com/akash-network/provider/cluster/kube/errors"
+	"github.com/akash-network/provider/cluster/types/v1beta3"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
+	clusterutil "github.com/akash-network/provider/cluster/util"
 )
 
 const (
@@ -51,13 +51,14 @@ var (
 	errInvalidLeaseService = fmt.Errorf("%w lease service error", errMetalLB)
 )
 
+//go:generate mockery --name Client --structname MetalLBClient --filename metallb_client.go --output ../../mocks
 type Client interface {
 	GetIPAddressUsage(ctx context.Context) (uint, uint, error)
-	GetIPAddressStatusForLease(ctx context.Context, leaseID mtypes.LeaseID) ([]v1beta2.IPLeaseState, error)
+	GetIPAddressStatusForLease(ctx context.Context, leaseID mtypes.LeaseID) ([]v1beta3.IPLeaseState, error)
 
 	CreateIPPassthrough(ctx context.Context, directive ctypes.ClusterIPPassthroughDirective) error
 	PurgeIPPassthrough(ctx context.Context, directive ctypes.ClusterIPPassthroughDirective) error
-	GetIPPassthroughs(ctx context.Context) ([]v1beta2.IPPassthrough, error)
+	GetIPPassthroughs(ctx context.Context) ([]v1beta3.IPPassthrough, error)
 	DetectPoolChanges(ctx context.Context) (<-chan struct{}, error)
 
 	Stop()
@@ -261,7 +262,7 @@ func (ipls ipLeaseState) GetProtocol() manifest.ServiceProtocol {
 	return ipls.protocol
 }
 
-func (c *client) GetIPAddressStatusForLease(ctx context.Context, leaseID mtypes.LeaseID) ([]v1beta2.IPLeaseState, error) {
+func (c *client) GetIPAddressStatusForLease(ctx context.Context, leaseID mtypes.LeaseID) ([]v1beta3.IPLeaseState, error) {
 	ns := builder.LidNS(leaseID)
 	servicePager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 		return c.kube.CoreV1().Services(ns).List(ctx, opts)
@@ -278,7 +279,7 @@ func (c *client) GetIPAddressStatusForLease(ctx context.Context, leaseID mtypes.
 		return nil, err
 	}
 
-	result := make([]v1beta2.IPLeaseState, 0)
+	result := make([]v1beta3.IPLeaseState, 0)
 	err = servicePager.EachListItem(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector.String(),
 	},
@@ -429,7 +430,7 @@ func (c *client) CreateIPPassthrough(ctx context.Context, directive ctypes.Clust
 	return nil
 }
 
-func (c *client) GetIPPassthroughs(ctx context.Context) ([]v1beta2.IPPassthrough, error) {
+func (c *client) GetIPPassthroughs(ctx context.Context) ([]v1beta3.IPPassthrough, error) {
 	servicePager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 		return c.kube.CoreV1().Services(metav1.NamespaceAll).List(ctx, opts)
 	})
@@ -445,7 +446,7 @@ func (c *client) GetIPPassthroughs(ctx context.Context) ([]v1beta2.IPPassthrough
 		return nil, err
 	}
 
-	result := make([]v1beta2.IPPassthrough, 0)
+	result := make([]v1beta3.IPPassthrough, 0)
 	err = servicePager.EachListItem(ctx,
 		metav1.ListOptions{
 			LabelSelector: labelSelector.String(),

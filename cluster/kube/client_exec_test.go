@@ -11,21 +11,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/akash-network/node/sdl"
-	"github.com/akash-network/node/testutil"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 
-	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta1"
-	akashclient_fake "github.com/akash-network/provider/pkg/client/clientset/versioned/fake"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
+	"github.com/akash-network/node/sdl"
+	"github.com/akash-network/node/testutil"
 
 	"github.com/akash-network/provider/cluster"
 	"github.com/akash-network/provider/cluster/kube/builder"
-
-	kubefake "k8s.io/client-go/kubernetes/fake"
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
+	akashclient_fake "github.com/akash-network/provider/pkg/client/clientset/versioned/fake"
 )
 
 const (
@@ -108,7 +107,11 @@ func withExecTestScaffold(t *testing.T, changePod func(pod *corev1.Pod) error, t
 	require.NoError(t, err)
 	require.Len(t, mani, 1)
 
-	s.crdManifest, err = crd.NewManifest(testKubeClientNs, s.leaseID, &mani[0])
+	sparams := crd.ClusterSettings{
+		SchedulerParams: make([]*crd.SchedulerParams, len(mani[0].Services)),
+	}
+
+	s.crdManifest, err = crd.NewManifest(testKubeClientNs, s.leaseID, &mani[0], sparams)
 	require.NoError(t, err)
 	require.NotNil(t, s.crdManifest)
 

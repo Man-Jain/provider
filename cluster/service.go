@@ -3,14 +3,9 @@ package cluster
 import (
 	"context"
 
-	"github.com/akash-network/provider/operator/waiter"
-
-	"github.com/akash-network/provider/cluster/operatorclients"
-
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
 	"github.com/boz/go-lifecycle"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
-
-	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta1"
 
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,17 +13,22 @@ import (
 
 	"github.com/tendermint/tendermint/libs/log"
 
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
 	"github.com/akash-network/node/pubsub"
-	atypes "github.com/akash-network/node/types/v1beta2"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 
-	ctypes "github.com/akash-network/provider/cluster/types/v1beta2"
+	"github.com/akash-network/provider/cluster/operatorclients"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	"github.com/akash-network/provider/event"
+	"github.com/akash-network/provider/operator/waiter"
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 	"github.com/akash-network/provider/session"
 )
 
 // ErrNotRunning is the error when service is not running
-var ErrNotRunning = errors.New("not running")
+var (
+	ErrNotRunning      = errors.New("not running")
+	ErrInvalidResource = errors.New("invalid resource")
+)
 
 var (
 	deploymentManagerGauge = promauto.NewGauge(prometheus.GaugeOpts{
@@ -40,8 +40,10 @@ var (
 )
 
 // Cluster is the interface that wraps Reserve and Unreserve methods
+//
+//go:generate mockery --name Cluster
 type Cluster interface {
-	Reserve(mtypes.OrderID, atypes.ResourceGroup) (ctypes.Reservation, error)
+	Reserve(mtypes.OrderID, dtypes.ResourceGroup) (ctypes.Reservation, error)
 	Unreserve(mtypes.OrderID) error
 }
 
@@ -52,6 +54,8 @@ type StatusClient interface {
 }
 
 // Service manage compute cluster for the provider.  Will eventually integrate with kubernetes, etc...
+//
+//go:generate mockery --name Service
 type Service interface {
 	StatusClient
 	Cluster
@@ -211,7 +215,7 @@ func (s *service) Ready() <-chan struct{} {
 	return s.inventory.ready()
 }
 
-func (s *service) Reserve(order mtypes.OrderID, resources atypes.ResourceGroup) (ctypes.Reservation, error) {
+func (s *service) Reserve(order mtypes.OrderID, resources dtypes.ResourceGroup) (ctypes.Reservation, error) {
 	return s.inventory.reserve(order, resources)
 }
 
@@ -258,7 +262,7 @@ func (s *service) updateDeploymentManagerGauge() {
 	deploymentManagerGauge.Set(float64(len(s.managers)))
 }
 
-func (s *service) run(ctx context.Context, deployments []ctypes.Deployment) {
+func (s *service) run(ctx context.Context, deployments []ctypes.IDeployment) {
 	defer s.lc.ShutdownCompleted()
 	defer s.sub.Close()
 
@@ -272,9 +276,7 @@ func (s *service) run(ctx context.Context, deployments []ctypes.Deployment) {
 	}
 
 	for _, deployment := range deployments {
-		key := deployment.LeaseID()
-		mgroup := deployment.ManifestGroup()
-		s.managers[key] = newDeploymentManager(s, deployment.LeaseID(), &mgroup, false)
+		s.managers[deployment.LeaseID()] = newDeploymentManager(s, deployment, false)
 		s.updateDeploymentManagerGauge()
 	}
 
@@ -295,9 +297,17 @@ loop:
 					break
 				}
 
-				if _, err := s.inventory.lookup(ev.LeaseID.OrderID(), mgroup); err != nil {
+				reservation, err := s.inventory.lookup(ev.LeaseID.OrderID(), mgroup)
+
+				if err != nil {
 					s.log.Error("error looking up manifest", "err", err, "lease", ev.LeaseID, "group-name", mgroup.Name)
 					break
+				}
+
+				deployment := &ctypes.Deployment{
+					Lid:     ev.LeaseID,
+					MGroup:  mgroup,
+					CParams: reservation.ClusterParams(),
 				}
 
 				key := ev.LeaseID
@@ -308,13 +318,13 @@ loop:
 						s.log.Error("Not enough resources in cluster for update", "err", err, "lease", ev.LeaseID, "group-name", mgroup.Name)
 						break
 					}
-					if err := manager.update(mgroup); err != nil {
+					if err := manager.update(deployment); err != nil {
 						s.log.Error("updating deployment", "err", err, "lease", ev.LeaseID, "group-name", mgroup.Name)
 					}
 					break
 				}
 
-				s.managers[key] = newDeploymentManager(s, ev.LeaseID, mgroup, true)
+				s.managers[key] = newDeploymentManager(s, deployment, true)
 			case mtypes.EventLeaseClosed:
 				_ = s.bus.Publish(event.LeaseRemoveFundsMonitor{LeaseID: ev.ID})
 				s.teardownLease(ev.ID)
@@ -324,15 +334,16 @@ loop:
 				Leases: uint32(len(s.managers)),
 			}
 		case dm := <-s.managerch:
-			s.log.Info("manager done", "lease", dm.lease)
+			s.log.Info("manager done", "lease", dm.deployment.LeaseID())
 
 			// unreserve resources
-			if err := s.inventory.unreserve(dm.lease.OrderID()); err != nil {
-				s.log.Error("unreserving inventory", "err", err,
-					"lease", dm.lease)
+			if err := s.inventory.unreserve(dm.deployment.LeaseID().OrderID()); err != nil {
+				s.log.Error("unreserving inventory",
+					"err", err,
+					"lease", dm.deployment.LeaseID())
 			}
 
-			delete(s.managers, dm.lease)
+			delete(s.managers, dm.deployment.LeaseID())
 		case req := <-s.checkDeploymentExistsRequestCh:
 			s.doCheckDeploymentExists(req)
 		}
@@ -342,7 +353,7 @@ loop:
 	for _, manager := range s.managers {
 		if manager != nil {
 			manager := <-s.managerch
-			s.log.Debug("manager done", "lease", manager.lease)
+			s.log.Debug("manager done", "lease", manager.deployment.LeaseID())
 		}
 	}
 
@@ -380,7 +391,7 @@ func (s *service) teardownLease(lid mtypes.LeaseID) {
 	}
 }
 
-func findDeployments(ctx context.Context, log log.Logger, client Client, _ session.Session) ([]ctypes.Deployment, error) {
+func findDeployments(ctx context.Context, log log.Logger, client Client, _ session.Session) ([]ctypes.IDeployment, error) {
 	deployments, err := client.Deployments(ctx)
 	if err != nil {
 		log.Error("fetching deployments", "err", err)

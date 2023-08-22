@@ -2,11 +2,27 @@ ifeq (, $(shell which direnv))
 $(warning "No direnv in $(PATH), consider installing. https://direnv.net")
 endif
 
-# expecting GNU make >= 4.0. so comparing major version only
-MAKE_MAJOR_VERSION        := $(shell echo $(MAKE_VERSION) | cut -d"." -f1)
+ifeq ($(OS),Windows_NT)
+$(error "Windows is not supported as build host")
+endif
 
+# certain targets need to use bash
+# detect where bash is installed
+# use akash-node-ready target as example
+BASH_PATH := $(shell which bash)
+
+SHELL := $(BASH_PATH)
+
+# expecting GNU make >= 4.0. so comparing major version only
+MAKE_MAJOR_VERSION := $(shell echo $(MAKE_VERSION) | cut -d "." -f1)
 ifneq (true, $(shell [ $(MAKE_MAJOR_VERSION) -ge 4 ] && echo true))
 $(error "make version is outdated. min required 4.0")
+endif
+
+# expecting BASH >= 4.x. so comparing major version only
+BASH_MAJOR_VERSION := $(shell $(BASH_PATH) -c 'echo $$BASH_VERSINFO')
+ifneq (true, $(shell [ $(BASH_MAJOR_VERSION) -ge 4 ] && echo true))
+$(error "bash version $(shell $(BASH_PATH) -c 'echo $$BASH_VERSION') is outdated. min required 4.0")
 endif
 
 # AP_ROOT may not be set if environment does not support/use direnv
@@ -20,17 +36,13 @@ ifndef AP_ROOT
 	AKASH               ?= $(AP_DEVCACHE_BIN)/akash
 
 	# setup .cache bins first in paths to have precedence over already installed same tools for system wide use
-	PATH         := $(AP_DEVCACHE_BIN):$(AP_DEVCACHE_NODE_BIN):$(PATH)
+	PATH                := $(AP_DEVCACHE_BIN):$(AP_DEVCACHE_NODE_BIN):$(PATH)
 endif
-
-#vr = $(shell which docker-credential-desktop)
-#
-#$(error $(vr))
 
 UNAME_OS                   := $(shell uname -s)
 UNAME_OS_LOWER             := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 # uname reports x86_64. rename to amd64 to make it usable by goreleaser
-UNAME_ARCH                 := $(shell uname -m | sed "s/x86_64/amd64/g")
+UNAME_ARCH                 ?= $(shell uname -m | sed "s/x86_64/amd64/g")
 
 ifeq (, $(shell which wget))
 $(error "No wget in $(PATH), consider installing")
@@ -41,21 +53,72 @@ $(error "No realpath in $(PATH), consider installing")
 endif
 
 BINS                         := $(PROVIDER_SERVICES) akash
+SEMVER                     := $(ROOT_DIR)/script/semver.sh
 
+__local_go                   := $(shell GOTOOLCHAIN=local go version | cut -d ' ' -f 3 | sed 's/go*//' | tr -d '\n')
+__is_local_go_satisfies      := $(shell $(SEMVER) compare "v$(__local_go)" "v1.20.7"; echo $?)
+
+ifeq (-1, $(__is_local_go_satisfies))
+$(error "unsupported local go$(__local_go) version . min required go1.21.0")
+endif
+
+GO_VERSION                   := $(shell go mod edit -json | jq -r .Go | tr -d '\n')
+GOTOOLCHAIN                  := $(shell go mod edit -json | jq -r .Toolchain | tr -d '\n')
+GOTOOLCHAIN_SEMVER           := v$(shell echo "$(GOTOOLCHAIN)" | sed 's/go*//' | tr -d '\n')
+
+GOWORK                       ?= on
+GO_MOD                       ?= readonly
 export GO                    := GO111MODULE=$(GO111MODULE) go
+GO_BUILD                     := $(GO) build -mod=$(GO_MOD)
+GO_TEST                      := $(GO) test -mod=$(GO_MOD)
+GO_VET                       := $(GO) vet -mod=$(GO_MOD)
+
+ifeq ($(OS),Windows_NT)
+	DETECTED_OS := Windows
+else
+	DETECTED_OS := $(shell sh -c 'uname 2>/dev/null || echo Unknown')
+endif
+
+# on MacOS disable deprecation warnings security framework
+ifeq ($(DETECTED_OS), Darwin)
+	export CGO_CFLAGS=-Wno-deprecated-declarations
+
+	# on MacOS Sonoma Beta there is a bit of discrepancy between Go and new prime linker
+	clang_version := $(shell echo | clang -dM -E - | grep __clang_major__ | cut -d ' ' -f 3 | tr -d '\n')
+	go_has_ld_fix := $(shell $(SEMVER) compare "$(GOTOOLCHAIN_SEMVER)" "v1.22.0" | tr -d '\n')
+
+	ifeq (15,$(clang_version))
+		ifeq (-1,$(go_has_ld_fix))
+			export CGO_LDFLAGS=-Wl,-ld_classic -Wno-deprecated-declarations
+		endif
+	endif
+endif
 
 GO_MOD_NAME                  := $(shell go list -m 2>/dev/null)
-AKASH_SRC_IS_LOCAL           := $(shell $(ROOT_DIR)/script/is_local_gomod.sh "github.com/akash-network/node")
-AKASH_LOCAL_PATH             := $(shell $(GO) list -mod=readonly -m -f '{{ .Replace }}' "github.com/akash-network/node")
-AKASH_VERSION                := $(shell $(GO) list -mod=readonly -m -f '{{ .Version }}' github.com/akash-network/node | cut -c2-)
+
+AKASHD_MODULE                := github.com/akash-network/node
+REPLACED_MODULES             := $(shell go list -mod=readonly -m -f '{{ .Replace }}' all 2>/dev/null | grep -v -x -F "<nil>" | grep "^/")
+AKASHD_SRC_IS_LOCAL          := $(shell $(ROOT_DIR)/script/is_local_gomod.sh "$(AKASHD_MODULE)")
+AKASHD_LOCAL_PATH            := $(shell $(GO) list -mod=readonly -m -f '{{ .Dir }}' "$(AKASHD_MODULE)")
+AKASHD_VERSION               := $(shell $(GO) list -mod=readonly -m -f '{{ .Version }}' $(AKASHD_MODULE) | cut -c2-)
 GRPC_GATEWAY_VERSION         := $(shell $(GO) list -mod=readonly -m -f '{{ .Version }}' github.com/grpc-ecosystem/grpc-gateway)
-GOLANGCI_LINT_VERSION        ?= v1.50.0
+GOLANGCI_LINT_VERSION        ?= v1.51.2
 GOLANG_VERSION               ?= 1.16.1
 STATIK_VERSION               ?= v0.1.7
 GIT_CHGLOG_VERSION           ?= v0.15.1
-MODVENDOR_VERSION            ?= v0.3.0
-MOCKERY_VERSION              ?= 2.12.1
-K8S_CODE_GEN_VERSION         ?= v0.19.3
+MOCKERY_VERSION              ?= 2.32.0
+K8S_CODE_GEN_VERSION         ?= $(shell $(GO) list -mod=readonly -m -f '{{ .Version }}' k8s.io/code-generator)
+
+AKASHD_BUILD_FROM_SRC        := $(AKASHD_SRC_IS_LOCAL)
+ifeq (false,$(AKASHD_BUILD_FROM_SRC))
+	AKASHD_BUILD_FROM_SRC := $(shell curl -sL \
+	  -H "Accept: application/vnd.github+json" \
+	  -H "Authorization: Bearer $${GITHUB_TOKEN}" \
+	  -H "X-GitHub-Api-Version: 2022-11-28" \
+	  https://api.github.com/repos/akash-network/node/releases/tags/v0.23.2-rc4 | jq -e --arg name "akash_darwin_all.zip" '.assets[] | select(.name==$$name)' > /dev/null 2>&1 && echo -n true || echo -n false)
+endif
+
+RELEASE_DOCKER_IMAGE         ?= ghcr.io/akash-network/provider
 
 ifeq (0, $(shell which kind &>/dev/null; echo $$?))
 	KIND_VERSION                 ?= $(shell kind --version | cut -d" " -f3)
@@ -70,30 +133,19 @@ endif
 # <TOOL>_VERSION_FILE points to the marker file for the installed version.
 # If <TOOL>_VERSION_FILE is changed, the binary will be re-downloaded.
 STATIK_VERSION_FILE              := $(AP_DEVCACHE_VERSIONS)/statik/$(STATIK_VERSION)
-MODVENDOR_VERSION_FILE           := $(AP_DEVCACHE_VERSIONS)/modvendor/$(MODVENDOR_VERSION)
 GIT_CHGLOG_VERSION_FILE          := $(AP_DEVCACHE_VERSIONS)/git-chglog/$(GIT_CHGLOG_VERSION)
 MOCKERY_VERSION_FILE             := $(AP_DEVCACHE_VERSIONS)/mockery/v$(MOCKERY_VERSION)
 K8S_CODE_GEN_VERSION_FILE        := $(AP_DEVCACHE_VERSIONS)/k8s-codegen/$(K8S_CODE_GEN_VERSION)
 GOLANGCI_LINT_VERSION_FILE       := $(AP_DEVCACHE_VERSIONS)/golangci-lint/$(GOLANGCI_LINT_VERSION)
-AKASH_VERSION_FILE               := $(AP_DEVCACHE_VERSIONS)/akash/$(AKASH_VERSION)
+AKASHD_VERSION_FILE              := $(AP_DEVCACHE_VERSIONS)/akash/$(AKASHD_VERSION)
 KIND_VERSION_FILE                := $(AP_DEVCACHE_VERSIONS)/kind/$(KIND_VERSION)
 
-MODVENDOR                         = $(AP_DEVCACHE_BIN)/modvendor
-SWAGGER_COMBINE                   = $(AP_DEVCACHE_NODE_BIN)/swagger-combine
 STATIK                           := $(AP_DEVCACHE_BIN)/statik
 GIT_CHGLOG                       := $(AP_DEVCACHE_BIN)/git-chglog
 MOCKERY                          := $(AP_DEVCACHE_BIN)/mockery
-K8S_GENERATE_GROUPS              := $(AP_ROOT)/vendor/k8s.io/code-generator/generate-groups.sh
+K8S_KUBE_CODEGEN_FILE            := generate-groups.sh
+K8S_KUBE_CODEGEN                 := $(AP_DEVCACHE_BIN)/$(K8S_KUBE_CODEGEN_FILE)
 K8S_GO_TO_PROTOBUF               := $(AP_DEVCACHE_BIN)/go-to-protobuf
-NPM                              := npm
 GOLANGCI_LINT                    := $(AP_DEVCACHE_BIN)/golangci-lint
-
-AKASH_BIND_LOCAL ?=
-
-# if go.mod contains replace for akash on local filesystem
-# bind this path to goreleaser
-ifeq ($(AKASH_SRC_IS_LOCAL), true)
-AKASH_BIND_LOCAL := -v $(AKASH_LOCAL_PATH):$(AKASH_LOCAL_PATH)
-endif
 
 include $(AP_ROOT)/make/setup-cache.mk

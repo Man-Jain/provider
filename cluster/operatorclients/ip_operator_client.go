@@ -11,13 +11,14 @@ import (
 	"strings"
 	"sync"
 
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
-	"github.com/tendermint/tendermint/libs/log"
 	"k8s.io/client-go/rest"
 
-	ipoptypes "github.com/akash-network/provider/operator/ipoperator/types"
+	"github.com/tendermint/tendermint/libs/log"
+
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
 
 	clusterutil "github.com/akash-network/provider/cluster/util"
+	ipoptypes "github.com/akash-network/provider/operator/ipoperator/types"
 )
 
 var (
@@ -25,6 +26,7 @@ var (
 	errIPOperatorRemote = errors.New("ip operator remote error")
 )
 
+//go:generate mockery --name IPOperatorClient --output ../mocks
 type IPOperatorClient interface {
 	Check(ctx context.Context) error
 	GetIPAddressUsage(ctx context.Context) (ipoptypes.IPAddressUsage, error)

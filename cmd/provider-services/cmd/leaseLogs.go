@@ -10,9 +10,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
-
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
 	akashclient "github.com/akash-network/node/client"
 	cmdcommon "github.com/akash-network/node/cmd/common"
 	cutils "github.com/akash-network/node/x/cert/utils"

@@ -26,22 +26,22 @@ ifeq ($(UNAME_OS_LOWER), darwin)
 endif
 
 .PHONY: akash
-ifeq ($(AKASH_SRC_IS_LOCAL), true)
+ifeq ($(AKASHD_BUILD_FROM_SRC), true)
 akash:
 	@echo "compiling and installing Akash from local sources"
-	make -C $(AKASH_LOCAL_PATH) akash AKASH=$(AP_DEVCACHE_BIN)/node
+	make -C $(AKASHD_LOCAL_PATH) akash AKASH=$(AP_DEVCACHE_BIN)/akash
 else
-$(AKASH_VERSION_FILE): $(AP_DEVCACHE)
-	@echo "Installing akash $(AKASH_VERSION) ..."
+$(AKASHD_VERSION_FILE): $(AP_DEVCACHE)
+	@echo "Installing akash $(AKASHD_VERSION) ..."
 	rm -f $(AKASH)
-	wget -q https://github.com/akash-network/node/releases/download/v$(AKASH_VERSION)/akash_$(UNAME_OS_LOWER)_$(AKASH_INSTALL_ARCH).zip -O $(AP_DEVCACHE)/akash.zip
+	wget -q https://github.com/akash-network/node/releases/download/v$(AKASHD_VERSION)/akash_$(UNAME_OS_LOWER)_$(AKASH_INSTALL_ARCH).zip -O $(AP_DEVCACHE)/akash.zip
 	unzip -p $(AP_DEVCACHE)/akash.zip akash > $(AKASH)
 	chmod +x $(AKASH)
 	rm $(AP_DEVCACHE)/akash.zip
 	rm -rf "$(dir $@)"
 	mkdir -p "$(dir $@)"
 	touch $@
-akash: $(AKASH_VERSION_FILE)
+akash: $(AKASHD_VERSION_FILE)
 endif
 
 $(STATIK_VERSION_FILE): $(AP_DEVCACHE)
@@ -52,15 +52,6 @@ $(STATIK_VERSION_FILE): $(AP_DEVCACHE)
 	mkdir -p "$(dir $@)"
 	touch $@
 $(STATIK): $(STATIK_VERSION_FILE)
-
-$(MODVENDOR_VERSION_FILE): $(AP_DEVCACHE)
-	@echo "installing modvendor $(MODVENDOR_VERSION) ..."
-	rm -f $(MODVENDOR)
-	GOBIN=$(AP_DEVCACHE_BIN) $(GO) install github.com/goware/modvendor@$(MODVENDOR_VERSION)
-	rm -rf "$(dir $@)"
-	mkdir -p "$(dir $@)"
-	touch $@
-$(MODVENDOR): $(MODVENDOR_VERSION_FILE)
 
 $(GIT_CHGLOG_VERSION_FILE): $(AP_DEVCACHE)
 	@echo "installing git-chglog $(GIT_CHGLOG_VERSION) ..."
@@ -89,16 +80,17 @@ $(GOLANGCI_LINT_VERSION_FILE): $(AP_DEVCACHE)
 	touch $@
 $(GOLANGCI_LINT): $(GOLANGCI_LINT_VERSION_FILE)
 
-$(K8S_CODE_GEN_VERSION_FILE): $(AP_DEVCACHE) modvendor
+$(K8S_CODE_GEN_VERSION_FILE): $(AP_DEVCACHE)
 	@echo "installing k8s code-generator $(K8S_CODE_GEN_VERSION) ..."
 	rm -f $(K8S_GO_TO_PROTOBUF)
-	GOBIN=$(AP_DEVCACHE_BIN) go install $(ROOT_DIR)/vendor/k8s.io/code-generator/...
+	GOBIN=$(AP_DEVCACHE_BIN) go install k8s.io/code-generator/...
+	wget -q https://raw.githubusercontent.com/kubernetes/code-generator/$(K8S_CODE_GEN_VERSION)/$(K8S_KUBE_CODEGEN_FILE) -O $(K8S_KUBE_CODEGEN)
 	rm -rf "$(dir $@)"
 	mkdir -p "$(dir $@)"
 	touch $@
-	chmod +x $(K8S_GENERATE_GROUPS)
+	chmod +x $(K8S_KUBE_CODEGEN)
 $(K8S_GO_TO_PROTOBUF): $(K8S_CODE_GEN_VERSION_FILE)
-$(K8S_GENERATE_GROUPS): $(K8S_CODE_GEN_VERSION_FILE)
+$(K8S_KUBE_CODEGEN): $(K8S_CODE_GEN_VERSION_FILE)
 
 ifeq (false, $(_SYSTEM_KIND))
 $(KIND_VERSION_FILE): $(AP_DEVCACHE)
@@ -110,20 +102,6 @@ $(KIND_VERSION_FILE): $(AP_DEVCACHE)
 $(KIND): $(KIND_VERSION_FILE)
 else
 	@echo "using alread installed kind $(KIND_VERSION) $(KIND)"
-endif
-
-$(NPM):
-ifeq (, $(shell which $(NPM) 2>/dev/null))
-	$(error "npm installation required")
-endif
-
-$(SWAGGER_COMBINE): $(AP_DEVCACHE) $(NPM)
-ifeq (, $(shell which swagger-combine 2>/dev/null))
-	@echo "Installing swagger-combine..."
-	npm install swagger-combine --prefix $(AP_DEVCACHE_NODE_MODULES)
-	chmod +x $(SWAGGER_COMBINE)
-else
-	@echo "swagger-combine already installed; skipping..."
 endif
 
 cache-clean:

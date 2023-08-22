@@ -9,35 +9,27 @@ import (
 	"sync"
 	"time"
 
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
-
-	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta1"
-
-	"github.com/akash-network/node/sdl"
-
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/pkg/errors"
-	"k8s.io/client-go/tools/remotecommand"
-
 	eventsv1 "k8s.io/api/events/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/version"
+	"k8s.io/client-go/tools/remotecommand"
 
-	manifest "github.com/akash-network/node/manifest/v2beta1"
-
-	ctypes "github.com/akash-network/provider/cluster/types/v1beta2"
-
-	types "github.com/akash-network/node/types/v1beta2"
-
-	"github.com/akash-network/node/types/unit"
+	mani "github.com/akash-network/akash-api/go/manifest/v2beta2"
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
+	"github.com/akash-network/akash-api/go/node/types/unit"
+	types "github.com/akash-network/akash-api/go/node/types/v1beta3"
+	"github.com/akash-network/node/sdl"
 	mquery "github.com/akash-network/node/x/market/query"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 
-	akashtypes "github.com/akash-network/provider/pkg/apis/akash.network/v2beta1"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 )
 
+// Errors types returned by the Exec function on the client interface
 var (
-	// Errors types returned by the Exec function on the client interface
 	ErrExec                        = errors.New("remote command execute error")
 	ErrExecNoServiceWithName       = fmt.Errorf("%w: no such service exists with that name", ErrExec)
 	ErrExecServiceNotRunning       = fmt.Errorf("%w: service with that name is not running", ErrExec)
@@ -51,6 +43,7 @@ var (
 
 var _ Client = (*nullClient)(nil)
 
+//go:generate mockery --name ReadClient
 type ReadClient interface {
 	LeaseStatus(context.Context, mtypes.LeaseID) (map[string]*ctypes.ServiceStatus, error)
 	ForwardedPortStatus(context.Context, mtypes.LeaseID) (map[string][]ctypes.ForwardedPortStatus, error)
@@ -65,15 +58,17 @@ type ReadClient interface {
 	GetHostnameDeploymentConnections(ctx context.Context) ([]ctypes.LeaseIDHostnameConnection, error)
 
 	ObserveIPState(ctx context.Context) (<-chan ctypes.IPResourceEvent, error)
-	GetDeclaredIPs(ctx context.Context, leaseID mtypes.LeaseID) ([]akashtypes.ProviderLeasedIPSpec, error)
+	GetDeclaredIPs(ctx context.Context, leaseID mtypes.LeaseID) ([]crd.ProviderLeasedIPSpec, error)
 }
 
 // Client interface lease and deployment methods
+//
+//go:generate mockery --name Client
 type Client interface {
 	ReadClient
-	Deploy(ctx context.Context, lID mtypes.LeaseID, mgroup *manifest.Group) error
+	Deploy(ctx context.Context, deployment ctypes.IDeployment) error
 	TeardownLease(context.Context, mtypes.LeaseID) error
-	Deployments(context.Context) ([]ctypes.Deployment, error)
+	Deployments(context.Context) ([]ctypes.IDeployment, error)
 	Inventory(context.Context) (ctypes.Inventory, error)
 	Exec(ctx context.Context,
 		lID mtypes.LeaseID,
@@ -86,14 +81,14 @@ type Client interface {
 		tty bool,
 		tsq remotecommand.TerminalSizeQueue) (ctypes.ExecResult, error)
 
-	// Connect a given hostname to a deployment
+	// ConnectHostnameToDeployment Connect a given hostname to a deployment
 	ConnectHostnameToDeployment(ctx context.Context, directive ctypes.ConnectHostnameToDeploymentDirective) error
-	// Remove a given hostname from a deployment
+	// RemoveHostnameFromDeployment Remove a given hostname from a deployment
 	RemoveHostnameFromDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, allowMissing bool) error
 
-	// Declare that a given deployment should be connected to a given hostname
+	// DeclareHostname Declare that a given deployment should be connected to a given hostname
 	DeclareHostname(ctx context.Context, lID mtypes.LeaseID, host string, serviceName string, externalPort uint32) error
-	// Purge any hostnames associated with a given deployment
+	// PurgeDeclaredHostnames Purge any hostnames associated with a given deployment
 	PurgeDeclaredHostnames(ctx context.Context, lID mtypes.LeaseID) error
 
 	PurgeDeclaredHostname(ctx context.Context, lID mtypes.LeaseID, hostname string) error
@@ -101,8 +96,8 @@ type Client interface {
 	// KubeVersion returns the version information of kubernetes running in the cluster
 	KubeVersion() (*version.Info, error)
 
-	DeclareIP(ctx context.Context, lID mtypes.LeaseID, serviceName string, port uint32, externalPort uint32, proto manifest.ServiceProtocol, sharingKey string, overwrite bool) error
-	PurgeDeclaredIP(ctx context.Context, lID mtypes.LeaseID, serviceName string, externalPort uint32, proto manifest.ServiceProtocol) error
+	DeclareIP(ctx context.Context, lID mtypes.LeaseID, serviceName string, port uint32, externalPort uint32, proto mani.ServiceProtocol, sharingKey string, overwrite bool) error
+	PurgeDeclaredIP(ctx context.Context, lID mtypes.LeaseID, serviceName string, externalPort uint32, proto mani.ServiceProtocol) error
 	PurgeDeclaredIPs(ctx context.Context, lID mtypes.LeaseID) error
 }
 
@@ -143,13 +138,14 @@ func (rp *resourcePair) subNLZ(val types.ResourceValue) bool {
 	return true
 }
 
-func (rp resourcePair) available() sdk.Int {
+func (rp *resourcePair) available() sdk.Int {
 	return rp.allocatable.Sub(rp.allocated)
 }
 
 type node struct {
 	id               string
 	cpu              resourcePair
+	gpu              resourcePair
 	memory           resourcePair
 	ephemeralStorage resourcePair
 }
@@ -175,9 +171,9 @@ type inventory struct {
 
 var _ ctypes.Inventory = (*inventory)(nil)
 
-func (inv *inventory) Adjust(reservation ctypes.Reservation) error {
-	resources := make([]types.Resources, len(reservation.Resources().GetResources()))
-	copy(resources, reservation.Resources().GetResources())
+func (inv *inventory) Adjust(reservation ctypes.ReservationGroup, opts ...ctypes.InventoryOption) error {
+	resources := make(dtypes.ResourceUnits, len(reservation.Resources().GetResourceUnits()))
+	copy(resources, reservation.Resources().GetResourceUnits())
 
 	currInventory := inv.dup()
 
@@ -194,6 +190,13 @@ nodes:
 				cpu := nd.cpu.dup()
 				if adjusted = cpu.subNLZ(res.Resources.CPU.Units); !adjusted {
 					continue nodes
+				}
+
+				gpu := nd.gpu.dup()
+				if res.Resources.GPU != nil {
+					if adjusted = gpu.subNLZ(res.Resources.GPU.Units); !adjusted {
+						continue nodes
+					}
 				}
 
 				memory := nd.memory.dup()
@@ -249,6 +252,7 @@ nodes:
 				currInventory.nodes[nodeName] = &node{
 					id:               nd.id,
 					cpu:              cpu,
+					gpu:              gpu,
 					memory:           memory,
 					ephemeralStorage: ephemeralStorage,
 				}
@@ -273,11 +277,13 @@ nodes:
 
 func (inv *inventory) Metrics() ctypes.InventoryMetrics {
 	cpuTotal := uint64(0)
+	gpuTotal := uint64(0)
 	memoryTotal := uint64(0)
 	storageEphemeralTotal := uint64(0)
 	storageTotal := make(map[string]int64)
 
 	cpuAvailable := uint64(0)
+	gpuAvailable := uint64(0)
 	memoryAvailable := uint64(0)
 	storageEphemeralAvailable := uint64(0)
 	storageAvailable := make(map[string]int64)
@@ -297,12 +303,18 @@ func (inv *inventory) Metrics() ctypes.InventoryMetrics {
 		}
 
 		cpuTotal += nd.cpu.allocatable.Uint64()
+		gpuTotal += nd.gpu.allocatable.Uint64()
+
 		memoryTotal += nd.memory.allocatable.Uint64()
 		storageEphemeralTotal += nd.ephemeralStorage.allocatable.Uint64()
 
 		tmp := nd.cpu.allocatable.Sub(nd.cpu.allocated)
 		invNode.Available.CPU = tmp.Uint64()
 		cpuAvailable += invNode.Available.CPU
+
+		tmp = nd.gpu.allocatable.Sub(nd.gpu.allocated)
+		invNode.Available.GPU = tmp.Uint64()
+		gpuAvailable += invNode.Available.GPU
 
 		tmp = nd.memory.allocatable.Sub(nd.memory.allocated)
 		invNode.Available.Memory = tmp.Uint64()
@@ -317,6 +329,7 @@ func (inv *inventory) Metrics() ctypes.InventoryMetrics {
 
 	ret.TotalAllocatable = ctypes.InventoryMetricTotal{
 		CPU:              cpuTotal,
+		GPU:              gpuTotal,
 		Memory:           memoryTotal,
 		StorageEphemeral: storageEphemeralTotal,
 		Storage:          storageTotal,
@@ -324,6 +337,7 @@ func (inv *inventory) Metrics() ctypes.InventoryMetrics {
 
 	ret.TotalAvailable = ctypes.InventoryMetricTotal{
 		CPU:              cpuAvailable,
+		GPU:              gpuAvailable,
 		Memory:           memoryAvailable,
 		StorageEphemeral: storageEphemeralAvailable,
 		Storage:          storageAvailable,
@@ -341,6 +355,7 @@ func (inv *inventory) dup() *inventory {
 		res.nodes = append(res.nodes, &node{
 			id:               nd.id,
 			cpu:              nd.cpu.dup(),
+			gpu:              nd.gpu.dup(),
 			memory:           nd.memory.dup(),
 			ephemeralStorage: nd.ephemeralStorage.dup(),
 		})
@@ -352,6 +367,7 @@ func (inv *inventory) dup() *inventory {
 const (
 	// 5 CPUs, 5Gi memory for null client.
 	nullClientCPU     = 5000
+	nullClientGPU     = 2
 	nullClientMemory  = 32 * unit.Gi
 	nullClientStorage = 512 * unit.Gi
 )
@@ -359,7 +375,7 @@ const (
 type nullLease struct {
 	ctx    context.Context
 	cancel func()
-	group  *manifest.Group
+	group  *mani.Group
 }
 
 type nullClient struct {
@@ -384,42 +400,43 @@ func NullClient() Client {
 	}
 }
 
-func (c *nullClient) RemoveHostnameFromDeployment(ctx context.Context, hostname string, leaseID mtypes.LeaseID, allowMissing bool) error {
+func (c *nullClient) RemoveHostnameFromDeployment(_ context.Context, _ string, _ mtypes.LeaseID, _ bool) error {
 	return errNotImplemented
 }
 
-func (c *nullClient) ObserveHostnameState(ctx context.Context) (<-chan ctypes.HostnameResourceEvent, error) {
+func (c *nullClient) ObserveHostnameState(_ context.Context) (<-chan ctypes.HostnameResourceEvent, error) {
 	return nil, errNotImplemented
 }
-func (c *nullClient) GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error) {
-	return nil, errNotImplemented
-}
-func (c *nullClient) GetHostnameDeploymentConnections(ctx context.Context) ([]ctypes.LeaseIDHostnameConnection, error) {
+func (c *nullClient) GetDeployments(_ context.Context, _ dtypes.DeploymentID) ([]ctypes.IDeployment, error) {
 	return nil, errNotImplemented
 }
 
-// Connect a given hostname to a deployment
-func (c *nullClient) ConnectHostnameToDeployment(ctx context.Context, directive ctypes.ConnectHostnameToDeploymentDirective) error {
+func (c *nullClient) GetHostnameDeploymentConnections(_ context.Context) ([]ctypes.LeaseIDHostnameConnection, error) {
+	return nil, errNotImplemented
+}
+
+func (c *nullClient) ConnectHostnameToDeployment(_ context.Context, _ ctypes.ConnectHostnameToDeploymentDirective) error {
 	return errNotImplemented
 }
 
-// Declare that a given deployment should be connected to a given hostname
-func (c *nullClient) DeclareHostname(ctx context.Context, lID mtypes.LeaseID, host string, serviceName string, externalPort uint32) error {
+func (c *nullClient) DeclareHostname(_ context.Context, _ mtypes.LeaseID, _ string, _ string, _ uint32) error {
 	return errNotImplemented
 }
 
-// Purge any hostnames associated with a given deployment
-func (c *nullClient) PurgeDeclaredHostnames(ctx context.Context, lID mtypes.LeaseID) error {
+func (c *nullClient) PurgeDeclaredHostnames(_ context.Context, _ mtypes.LeaseID) error {
 	return errNotImplemented
 }
 
-func (c *nullClient) PurgeDeclaredHostname(ctx context.Context, lID mtypes.LeaseID, hostname string) error {
+func (c *nullClient) PurgeDeclaredHostname(_ context.Context, _ mtypes.LeaseID, _ string) error {
 	return errNotImplemented
 }
 
-func (c *nullClient) Deploy(ctx context.Context, lid mtypes.LeaseID, mgroup *manifest.Group) error {
+func (c *nullClient) Deploy(ctx context.Context, deployment ctypes.IDeployment) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
+
+	lid := deployment.LeaseID()
+	mgroup := deployment.ManifestGroup()
 
 	ctx, cancel := context.WithCancel(ctx)
 	c.leases[mquery.LeasePath(lid)] = &nullLease{
@@ -479,7 +496,7 @@ func (c *nullClient) LeaseEvents(ctx context.Context, lid mtypes.LeaseID, _ stri
 		genEvent := func() *eventsv1.Event {
 			return &eventsv1.Event{
 				EventTime:           v1.NewMicroTime(time.Now()),
-				ReportingController: lease.group.Name,
+				ReportingController: lease.group.GetName(),
 			}
 		}
 
@@ -537,7 +554,7 @@ func (c *nullClient) TeardownLease(_ context.Context, lid mtypes.LeaseID) error 
 	return nil
 }
 
-func (c *nullClient) Deployments(context.Context) ([]ctypes.Deployment, error) {
+func (c *nullClient) Deployments(context.Context) ([]ctypes.IDeployment, error) {
 	return nil, nil
 }
 
@@ -549,6 +566,10 @@ func (c *nullClient) Inventory(context.Context) (ctypes.Inventory, error) {
 				cpu: resourcePair{
 					allocatable: sdk.NewInt(nullClientCPU),
 					allocated:   sdk.NewInt(nullClientCPU - 100),
+				},
+				gpu: resourcePair{
+					allocatable: sdk.NewInt(nullClientGPU),
+					allocated:   sdk.NewInt(1),
 				},
 				memory: resourcePair{
 					allocatable: sdk.NewInt(nullClientMemory),
@@ -590,30 +611,30 @@ func (c *nullClient) KubeVersion() (*version.Info, error) {
 	return nil, nil
 }
 
-func (c *nullClient) DeclareIP(ctx context.Context, lID mtypes.LeaseID, serviceName string, port uint32, externalPort uint32, proto manifest.ServiceProtocol, sharingKey string, overwrite bool) error {
+func (c *nullClient) DeclareIP(_ context.Context, _ mtypes.LeaseID, _ string, _ uint32, _ uint32, _ mani.ServiceProtocol, _ string, _ bool) error {
 	return errNotImplemented
 }
 
-func (c *nullClient) PurgeDeclaredIPs(ctx context.Context, lID mtypes.LeaseID) error {
+func (c *nullClient) PurgeDeclaredIPs(_ context.Context, _ mtypes.LeaseID) error {
 	return errNotImplemented
 }
 
-func (c *nullClient) ObserveIPState(ctx context.Context) (<-chan ctypes.IPResourceEvent, error) {
+func (c *nullClient) ObserveIPState(_ context.Context) (<-chan ctypes.IPResourceEvent, error) {
 	return nil, errNotImplemented
 }
 
-func (c *nullClient) CreateIPPassthrough(ctx context.Context, lID mtypes.LeaseID, directive ctypes.ClusterIPPassthroughDirective) error {
+func (c *nullClient) CreateIPPassthrough(_ context.Context, _ mtypes.LeaseID, _ ctypes.ClusterIPPassthroughDirective) error {
 	return errNotImplemented
 }
 
-func (c *nullClient) PurgeIPPassthrough(ctx context.Context, lID mtypes.LeaseID, directive ctypes.ClusterIPPassthroughDirective) error {
+func (c *nullClient) PurgeIPPassthrough(_ context.Context, _ mtypes.LeaseID, _ ctypes.ClusterIPPassthroughDirective) error {
 	return errNotImplemented
 }
 
-func (c *nullClient) PurgeDeclaredIP(ctx context.Context, lID mtypes.LeaseID, serviceName string, externalPort uint32, proto manifest.ServiceProtocol) error {
+func (c *nullClient) PurgeDeclaredIP(_ context.Context, _ mtypes.LeaseID, _ string, _ uint32, _ mani.ServiceProtocol) error {
 	return errNotImplemented
 }
 
-func (c *nullClient) GetDeclaredIPs(ctx context.Context, leaseID mtypes.LeaseID) ([]akashtypes.ProviderLeasedIPSpec, error) {
+func (c *nullClient) GetDeclaredIPs(_ context.Context, _ mtypes.LeaseID) ([]crd.ProviderLeasedIPSpec, error) {
 	return nil, errNotImplemented
 }

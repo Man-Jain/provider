@@ -10,10 +10,8 @@ import (
 	"strings"
 	"time"
 
-	manifest "github.com/akash-network/node/manifest/v2beta1"
-	sdlutil "github.com/akash-network/node/sdl/util"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
-
+	manifest "github.com/akash-network/akash-api/go/manifest/v2beta2"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/tendermint/tendermint/libs/log"
@@ -22,11 +20,11 @@ import (
 
 	"github.com/akash-network/provider/cluster"
 	clusterClient "github.com/akash-network/provider/cluster/kube"
-	ctypes "github.com/akash-network/provider/cluster/types/v1beta2"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	clusterutil "github.com/akash-network/provider/cluster/util"
 	providerflags "github.com/akash-network/provider/cmd/provider-services/cmd/flags"
 	"github.com/akash-network/provider/operator/operatorcommon"
-	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta1"
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 )
 
 var (
@@ -334,10 +332,12 @@ func locateServiceFromManifest(ctx context.Context, client cluster.Client, lease
 			continue
 		}
 
-		if externalPort == uint32(sdlutil.ExposeExternalPort(manifest.ServiceExpose{
-			Port:         expose.Port,
-			ExternalPort: expose.ExternalPort,
-		})) {
+		mse := manifest.ServiceExpose{
+			Port:         uint32(expose.Port),
+			ExternalPort: uint32(expose.ExternalPort),
+		}
+
+		if externalPort == uint32(mse.GetExternalPort()) {
 			selectedExpose = expose
 			break
 		}

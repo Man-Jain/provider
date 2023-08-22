@@ -17,17 +17,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/akash-network/provider/cluster/util"
-
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	"github.com/akash-network/akash-api/go/node/types/unit"
+	atypes "github.com/akash-network/akash-api/go/node/types/v1beta3"
 	"github.com/akash-network/node/sdl"
 	"github.com/akash-network/node/testutil"
-	"github.com/akash-network/node/types/unit"
-	atypes "github.com/akash-network/node/types/v1beta2"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
+
+	"github.com/akash-network/provider/cluster/util"
 )
 
 func Test_ScalePricingRejectsAllZero(t *testing.T) {
@@ -61,7 +61,7 @@ func defaultGroupSpecCPUMem() *dtypes.GroupSpec {
 	gspec := &dtypes.GroupSpec{
 		Name:         "",
 		Requirements: atypes.PlacementRequirements{},
-		Resources:    make([]dtypes.Resource, 1),
+		Resources:    make(dtypes.ResourceUnits, 1),
 	}
 
 	cpu := atypes.CPU{}
@@ -70,13 +70,13 @@ func defaultGroupSpecCPUMem() *dtypes.GroupSpec {
 	memory := atypes.Memory{}
 	memory.Quantity = atypes.NewResourceValue(10000)
 
-	clusterResources := atypes.ResourceUnits{
+	clusterResources := atypes.Resources{
 		CPU:    &cpu,
 		Memory: &memory,
 	}
 
 	price := sdk.NewDecCoin("uakt", sdk.NewInt(23))
-	resource := dtypes.Resource{
+	resource := dtypes.ResourceUnit{
 		Resources: clusterResources,
 		Count:     1,
 		Price:     price,
@@ -91,18 +91,19 @@ func defaultGroupSpec() *dtypes.GroupSpec {
 	gspec := &dtypes.GroupSpec{
 		Name:         "",
 		Requirements: atypes.PlacementRequirements{},
-		Resources:    make([]dtypes.Resource, 1),
+		Resources:    make(dtypes.ResourceUnits, 1),
 	}
 
-	cpu := atypes.CPU{}
-	cpu.Units = atypes.NewResourceValue(11)
-
-	memory := atypes.Memory{}
-	memory.Quantity = atypes.NewResourceValue(10000)
-
-	clusterResources := atypes.ResourceUnits{
-		CPU:    &cpu,
-		Memory: &memory,
+	clusterResources := atypes.Resources{
+		CPU: &atypes.CPU{
+			Units: atypes.NewResourceValue(11),
+		},
+		Memory: &atypes.Memory{
+			Quantity: atypes.NewResourceValue(10000),
+		},
+		GPU: &atypes.GPU{
+			Units: atypes.NewResourceValue(0),
+		},
 		Storage: atypes.Volumes{
 			atypes.Storage{
 				Quantity: atypes.NewResourceValue(4096),
@@ -110,7 +111,7 @@ func defaultGroupSpec() *dtypes.GroupSpec {
 		},
 	}
 	price := sdk.NewDecCoin(testutil.CoinDenom, sdk.NewInt(23))
-	resource := dtypes.Resource{
+	resource := dtypes.ResourceUnit{
 		Resources: clusterResources,
 		Count:     1,
 		Price:     price,
@@ -130,7 +131,12 @@ func Test_ScalePricingFailsOnOverflow(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
 
-	price, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+
+	price, err := pricing.CalculatePrice(context.Background(), req)
 
 	require.Equal(t, sdk.DecCoin{}, price)
 	require.Equal(t, err, ErrBidQuantityInvalid)
@@ -146,7 +152,13 @@ func Test_ScalePricingOnCpu(t *testing.T) {
 	gspec := defaultGroupSpecCPUMem()
 	cpuQuantity := uint64(13)
 	gspec.Resources[0].Resources.CPU.Units = atypes.NewResourceValue(cpuQuantity)
-	price, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: gspec,
+	}
+
+	price, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
 
@@ -164,7 +176,13 @@ func Test_ScalePricingOnMemory(t *testing.T) {
 	gspec := defaultGroupSpecCPUMem()
 	memoryQuantity := uint64(123456)
 	gspec.Resources[0].Resources.Memory.Quantity = atypes.NewResourceValue(memoryQuantity)
-	price, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: gspec,
+	}
+
+	price, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 
 	expectedPrice := testutil.AkashDecCoin(t, int64(memoryScale*memoryQuantity))
@@ -182,7 +200,11 @@ func Test_ScalePricingOnMemoryLessThanOne(t *testing.T) {
 	// Make a resource exactly 1 byte
 	memoryQuantity := uint64(1)
 	gspec.Resources[0].Resources.Memory.Quantity = atypes.NewResourceValue(memoryQuantity)
-	price, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: gspec,
+	}
+	price, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 
 	expectedPrice, err := sdk.NewDecFromStr("0.0000009536743164")
@@ -192,7 +214,7 @@ func Test_ScalePricingOnMemoryLessThanOne(t *testing.T) {
 	// Make a resource exactly 1 less byte less than two megabytes
 	memoryQuantity = uint64(2*unit.Mi - 1)
 	gspec.Resources[0].Resources.Memory.Quantity = atypes.NewResourceValue(memoryQuantity)
-	price, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	price, err = pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 	require.NotNil(t, price)
 
@@ -228,7 +250,11 @@ func Test_ScalePricingOnStorage(t *testing.T) {
 	gspec := defaultGroupSpec()
 	storageQuantity := uint64(98765)
 	gspec.Resources[0].Resources.Storage[0].Quantity = atypes.NewResourceValue(storageQuantity)
-	price, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: gspec,
+	}
+	price, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 
 	decNearly(t, price.Amount, int64(storageScale*storageQuantity))
@@ -247,15 +273,18 @@ func Test_ScalePricingByCountOfResources(t *testing.T) {
 	gspec := defaultGroupSpec()
 	storageQuantity := uint64(111)
 	gspec.Resources[0].Resources.Storage[0].Quantity = atypes.NewResourceValue(storageQuantity)
-	firstPrice, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: gspec,
+	}
+	firstPrice, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 
 	require.NoError(t, err)
 	decNearly(t, firstPrice.Amount, int64(storageScale*storageQuantity))
 
 	gspec.Resources[0].Count = 2
-
-	secondPrice, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	secondPrice, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 	decNearly(t, secondPrice.Amount, 2*int64(storageScale*storageQuantity))
 }
@@ -277,7 +306,11 @@ func Test_ScalePricingForIPs(t *testing.T) {
 	})
 
 	require.Equal(t, uint(1), util.GetEndpointQuantityOfResourceGroup(gspec, atypes.Endpoint_LEASED_IP))
-	price, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: gspec,
+	}
+	price, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 
 	require.NoError(t, err)
@@ -288,14 +321,14 @@ func Test_ScalePricingForIPs(t *testing.T) {
 		SequenceNumber: 1368,
 	})
 	require.Equal(t, uint(2), util.GetEndpointQuantityOfResourceGroup(gspec, atypes.Endpoint_LEASED_IP))
-	price, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	price, err = pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 
 	require.NoError(t, err)
 	decNearly(t, price.Amount, 2*ipPriceInt)
 
 	gspec.Resources[0].Count = 33 // any number greater than 1 works here
-	price, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	price, err = pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 	decNearly(t, price.Amount, 2*ipPriceInt)
 }
@@ -328,8 +361,11 @@ func Test_ScriptPricingFailsWhenScriptDoesNotExist(t *testing.T) {
 	pricing, err := MakeShellScriptPricing(scriptPath, 1, 30000*time.Millisecond)
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
-
-	_, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+	_, err = pricing.CalculatePrice(context.Background(), req)
 	require.IsType(t, &os.PathError{}, errors.Unwrap(err))
 }
 
@@ -344,11 +380,16 @@ func Test_ScriptPricingFailsWhenScriptExitsNonZero(t *testing.T) {
 	err = fout.Close()
 	require.NoError(t, err)
 
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+
 	pricing, err := MakeShellScriptPricing(scriptPath, 1, 30000*time.Millisecond)
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
 
-	_, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
+	_, err = pricing.CalculatePrice(context.Background(), req)
 	require.IsType(t, &exec.ExitError{}, errors.Unwrap(err))
 }
 
@@ -367,8 +408,13 @@ func Test_ScriptPricingFailsWhenScriptExitsWithoutWritingResultToStdout(t *testi
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
 
-	_, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
-	require.Equal(t, io.EOF, errors.Unwrap(err))
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+
+	_, err = pricing.CalculatePrice(context.Background(), req)
+	require.ErrorIs(t, err, io.EOF)
 }
 
 func Test_ScriptPricingFailsWhenScriptWritesZeroResult(t *testing.T) {
@@ -386,7 +432,12 @@ func Test_ScriptPricingFailsWhenScriptWritesZeroResult(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
 
-	_, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+
+	_, err = pricing.CalculatePrice(context.Background(), req)
 	require.Equal(t, ErrBidZero, err)
 }
 
@@ -405,7 +456,12 @@ func Test_ScriptPricingFailsWhenScriptWritesNegativeResult(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
 
-	_, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+
+	_, err = pricing.CalculatePrice(context.Background(), req)
 	require.Equal(t, ErrBidQuantityInvalid, err)
 }
 
@@ -424,7 +480,12 @@ func Test_ScriptPricingWhenScriptWritesFractionalResult(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
 
-	result, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+
+	result, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 	expectedPrice, err := sdk.NewDecFromStr("1.5")
 	require.NoError(t, err)
@@ -437,7 +498,7 @@ func Test_ScriptPricingFailsWhenScriptWritesOverflowResult(t *testing.T) {
 	scriptPath := path.Join(tempdir, "test_script.sh")
 	fout, err := os.OpenFile(scriptPath, os.O_WRONLY|os.O_CREATE, os.ModePerm)
 	require.NoError(t, err)
-	// Write the maximum value, followed by zero so it is 10x
+	// Write the maximum value, followed by zero, so it is 10x
 	_, err = fmt.Fprintf(fout, "#!/bin/sh\necho %s0\nexit 0", sdk.MaxSortableDec.String())
 	require.NoError(t, err)
 	err = fout.Close()
@@ -447,8 +508,13 @@ func Test_ScriptPricingFailsWhenScriptWritesOverflowResult(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
 
-	_, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
-	require.Equal(t, ErrBidQuantityInvalid, err)
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+
+	_, err = pricing.CalculatePrice(context.Background(), req)
+	require.ErrorIs(t, err, ErrBidQuantityInvalid)
 }
 
 func Test_ScriptPricingReturnsResultFromScript(t *testing.T) {
@@ -467,7 +533,12 @@ func Test_ScriptPricingReturnsResultFromScript(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pricing)
 
-	price, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+
+	price, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 	require.Equal(t, "uakt", price.Denom)
 	require.Equal(t, sdk.NewDec(132), price.Amount)
@@ -491,7 +562,12 @@ func Test_ScriptPricingDoesNotExhaustSemaphore(t *testing.T) {
 	// run the script lots of time to make sure the channel used
 	// as a semaphore always has things returned to it
 	for i := 0; i != 111; i++ {
-		_, err = pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), defaultGroupSpec())
+		req := Request{
+			Owner: testutil.AccAddress(t).String(),
+			GSpec: defaultGroupSpec(),
+		}
+
+		_, err = pricing.CalculatePrice(context.Background(), req)
 		require.NoError(t, err)
 	}
 }
@@ -513,7 +589,11 @@ func Test_ScriptPricingStopsByContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = pricing.CalculatePrice(ctx, testutil.AccAddress(t).String(), defaultGroupSpec())
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+	_, err = pricing.CalculatePrice(ctx, req)
 	require.Error(t, err)
 	require.Equal(t, context.Canceled, err)
 }
@@ -539,7 +619,12 @@ func Test_ScriptPricingStopsByTimeout(t *testing.T) {
 	require.NotNil(t, pricing)
 
 	ctx := context.Background()
-	_, err = pricing.CalculatePrice(ctx, testutil.AccAddress(t).String(), defaultGroupSpec())
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: defaultGroupSpec(),
+	}
+
+	_, err = pricing.CalculatePrice(ctx, req)
 	require.Error(t, err)
 	require.Equal(t, context.DeadlineExceeded, err)
 }
@@ -562,7 +647,12 @@ func Test_ScriptPricingWritesJsonToStdin(t *testing.T) {
 	require.NotNil(t, pricing)
 
 	gspec := defaultGroupSpec()
-	price, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: gspec,
+	}
+
+	price, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
 	require.Equal(t, "uakt", price.Denom)
 	require.Equal(t, sdk.NewDec(1), price.Amount)
@@ -573,27 +663,28 @@ func Test_ScriptPricingWritesJsonToStdin(t *testing.T) {
 		_ = fin.Close()
 	}()
 	decoder := json.NewDecoder(fin)
-	data := make([]dataForScriptElement, 0)
+	data := dataForScript{}
 	err = decoder.Decode(&data)
 	require.NoError(t, err)
 
-	require.Len(t, data, len(gspec.Resources))
+	require.Len(t, data.Resources, len(gspec.Resources))
 
 	for i, r := range gspec.Resources {
-		require.Equal(t, r.Resources.CPU.Units.Val.Uint64(), data[i].CPU)
-		require.Equal(t, r.Resources.Memory.Quantity.Val.Uint64(), data[i].Memory)
-		require.Equal(t, r.Resources.Storage[0].Quantity.Val.Uint64(), data[i].Storage[0].Size)
-		require.Equal(t, r.Count, data[i].Count)
-		require.Equal(t, len(r.Resources.Endpoints), data[i].EndpointQuantity)
-		require.Equal(t, util.GetEndpointQuantityOfResourceUnits(r.Resources, atypes.Endpoint_LEASED_IP), data[i].IPLeaseQuantity)
+		require.Equal(t, r.Resources.CPU.Units.Val.Uint64(), data.Resources[i].CPU)
+		require.Equal(t, r.Resources.Memory.Quantity.Val.Uint64(), data.Resources[i].Memory)
+		require.Equal(t, r.Resources.Storage[0].Quantity.Val.Uint64(), data.Resources[i].Storage[0].Size)
+		require.Equal(t, r.Count, data.Resources[i].Count)
+		require.Equal(t, len(r.Resources.Endpoints), data.Resources[i].EndpointQuantity)
+		require.Equal(t, util.GetEndpointQuantityOfResourceUnits(r.Resources, atypes.Endpoint_LEASED_IP), data.Resources[i].IPLeaseQuantity)
 	}
 }
 
 func Test_ScriptPricingFromScript(t *testing.T) {
 	const (
 		mockAPIResponse = `{"akash-network":{"usd":3.57}}`
-		expectedPrice   = 67843138
 	)
+
+	expectedPrice := fmt.Sprintf("%.*f", DefaultPricePrecision, 67843137.254901960)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -613,11 +704,18 @@ func Test_ScriptPricingFromScript(t *testing.T) {
 	require.NotNil(t, pricing)
 
 	gspec := defaultGroupSpec()
-	gspec.Resources[0].Resources.Endpoints = make([]atypes.Endpoint, 7)
+	gspec.Resources[0].Resources.Endpoints = make(atypes.Endpoints, 7)
+	req := Request{
+		Owner: testutil.AccAddress(t).String(),
+		GSpec: gspec,
+	}
 
-	price, err := pricing.CalculatePrice(context.Background(), testutil.AccAddress(t).String(), gspec)
+	price, err := pricing.CalculatePrice(context.Background(), req)
 	require.NoError(t, err)
-	require.Equal(t, sdk.NewDecCoin("uakt", sdk.NewInt(expectedPrice)).String(), price.String())
+	amount, err := sdk.NewDecFromStr(expectedPrice)
+	require.NoError(t, err)
+
+	require.Equal(t, sdk.NewDecCoinFromDec("uakt", amount).String(), price.String())
 }
 
 func TestRationalToIntConversion(t *testing.T) {

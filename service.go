@@ -10,14 +10,14 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	bankTypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
 	aclient "github.com/akash-network/node/client"
 	"github.com/akash-network/node/pubsub"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
 
 	"github.com/akash-network/provider/bidengine"
 	"github.com/akash-network/provider/cluster"
 	"github.com/akash-network/provider/cluster/operatorclients"
-	clustertypes "github.com/akash-network/provider/cluster/types/v1beta2"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	"github.com/akash-network/provider/manifest"
 	"github.com/akash-network/provider/operator/waiter"
 	"github.com/akash-network/provider/session"
@@ -25,20 +25,23 @@ import (
 
 // ValidateClient is the interface to check if provider will bid on given groupspec
 type ValidateClient interface {
-	Validate(context.Context, dtypes.GroupSpec) (ValidateGroupSpecResult, error)
+	Validate(context.Context, sdk.Address, dtypes.GroupSpec) (ValidateGroupSpecResult, error)
 }
 
 // StatusClient is the interface which includes status of service
+//
+//go:generate mockery --name StatusClient
 type StatusClient interface {
 	Status(context.Context) (*Status, error)
 }
 
+//go:generate mockery --name Client
 type Client interface {
 	StatusClient
 	ValidateClient
 	Manifest() manifest.Client
 	Cluster() cluster.Client
-	Hostname() clustertypes.HostnameServiceClient
+	Hostname() ctypes.HostnameServiceClient
 	ClusterService() cluster.Service
 }
 
@@ -162,7 +165,7 @@ type service struct {
 	lc     lifecycle.Lifecycle
 }
 
-func (s *service) Hostname() clustertypes.HostnameServiceClient {
+func (s *service) Hostname() ctypes.HostnameServiceClient {
 	return s.cluster.HostnameService()
 }
 
@@ -208,9 +211,28 @@ func (s *service) Status(ctx context.Context) (*Status, error) {
 	}, nil
 }
 
-func (s *service) Validate(ctx context.Context, gspec dtypes.GroupSpec) (ValidateGroupSpecResult, error) {
+func (s *service) Validate(ctx context.Context, owner sdk.Address, gspec dtypes.GroupSpec) (ValidateGroupSpecResult, error) {
 	// FUTURE - pass owner here
-	price, err := s.config.BidPricingStrategy.CalculatePrice(ctx, "", &gspec)
+	req := bidengine.Request{
+		Owner: owner.String(),
+		GSpec: &gspec,
+	}
+
+	inv, err := s.cclient.Inventory(ctx)
+	if err != nil {
+		return ValidateGroupSpecResult{}, err
+	}
+
+	res := &reservation{
+		resources:     nil,
+		clusterParams: nil,
+	}
+
+	if err = inv.Adjust(res, ctypes.WithDryRun()); err != nil {
+		return ValidateGroupSpecResult{}, err
+	}
+
+	price, err := s.config.BidPricingStrategy.CalculatePrice(ctx, req)
 	if err != nil {
 		return ValidateGroupSpecResult{}, err
 	}
@@ -242,4 +264,28 @@ func (s *service) run() {
 	<-s.bc.lc.Done()
 
 	s.session.Log().Info("shutdown complete")
+}
+
+type reservation struct {
+	resources         dtypes.ResourceGroup
+	adjustedResources dtypes.ResourceUnits
+	clusterParams     interface{}
+}
+
+var _ ctypes.ReservationGroup = (*reservation)(nil)
+
+func (r *reservation) Resources() dtypes.ResourceGroup {
+	return r.resources
+}
+
+func (r *reservation) SetAllocatedResources(val dtypes.ResourceUnits) {
+	r.adjustedResources = val
+}
+
+func (r *reservation) SetClusterParams(val interface{}) {
+	r.clusterParams = val
+}
+
+func (r *reservation) ClusterParams() interface{} {
+	return r.clusterParams
 }

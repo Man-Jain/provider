@@ -10,27 +10,25 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
-	"github.com/akash-network/node/sdkutil"
-	"github.com/akash-network/node/validation/constants"
+	"github.com/akash-network/akash-api/go/node/types/constants"
+	"github.com/akash-network/akash-api/go/sdkutil"
 
 	"github.com/stretchr/testify/mock"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/akash-network/node/pubsub"
-	"github.com/akash-network/node/testutil"
-	atypes "github.com/akash-network/node/types/v1beta2"
-	audittypes "github.com/akash-network/node/x/audit/types/v1beta2"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
-	ptypes "github.com/akash-network/node/x/provider/types/v1beta2"
-
-	"github.com/akash-network/provider/session"
-
+	audittypes "github.com/akash-network/akash-api/go/node/audit/v1beta3"
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
+	ptypes "github.com/akash-network/akash-api/go/node/provider/v1beta3"
+	atypes "github.com/akash-network/akash-api/go/node/types/v1beta3"
 	broadcastmocks "github.com/akash-network/node/client/broadcaster/mocks"
 	clientmocks "github.com/akash-network/node/client/mocks"
+	"github.com/akash-network/node/pubsub"
+	"github.com/akash-network/node/testutil"
 
 	clustermocks "github.com/akash-network/provider/cluster/mocks"
+	"github.com/akash-network/provider/session"
 )
 
 type orderTestScaffold struct {
@@ -50,13 +48,25 @@ type orderTestScaffold struct {
 	reserveCallNotify chan int
 }
 
+type testBidPricingStrategy int64
+
+type alwaysFailsBidPricingStrategy struct {
+	failure error
+}
+
+var _ BidPricingStrategy = (*testBidPricingStrategy)(nil)
+var _ BidPricingStrategy = (*alwaysFailsBidPricingStrategy)(nil)
+
 func makeMocks(s *orderTestScaffold) {
 	groupResult := &dtypes.QueryGroupResponse{}
 	groupResult.Group.GroupSpec.Name = "testGroupName"
-	groupResult.Group.GroupSpec.Resources = make([]dtypes.Resource, 1)
+	groupResult.Group.GroupSpec.Resources = make(dtypes.ResourceUnits, 1)
 
 	cpu := atypes.CPU{}
 	cpu.Units = atypes.NewResourceValue(uint64(dtypes.GetValidationConfig().MinUnitCPU))
+
+	gpu := atypes.GPU{}
+	gpu.Units = atypes.NewResourceValue(uint64(dtypes.GetValidationConfig().MinUnitGPU))
 
 	memory := atypes.Memory{}
 	memory.Quantity = atypes.NewResourceValue(dtypes.GetValidationConfig().MinUnitMemory)
@@ -67,13 +77,15 @@ func makeMocks(s *orderTestScaffold) {
 		},
 	}
 
-	clusterResources := atypes.ResourceUnits{
+	clusterResources := atypes.Resources{
+		ID:      1,
 		CPU:     &cpu,
+		GPU:     &gpu,
 		Memory:  &memory,
 		Storage: storage,
 	}
 	price := sdk.NewInt64DecCoin(testutil.CoinDenom, 23)
-	resource := dtypes.Resource{
+	resource := dtypes.ResourceUnit{
 		Resources: clusterResources,
 		Count:     2,
 		Price:     price,
@@ -157,7 +169,7 @@ func makeOrderForTest(t *testing.T, checkForExistingBid bool, bidState mtypes.Bi
 	if callerConfig != nil {
 		cfg = *callerConfig // Copy values from caller
 	}
-	// Overwrite some with stuff built in this function
+	// Overwrite some with stuff built-in this function
 	cfg.PricingStrategy = pricing
 	cfg.Deposit = mtypes.DefaultBidMinDeposit
 	cfg.MaxGroupVolumes = constants.DefaultMaxGroupVolumes
@@ -608,9 +620,7 @@ func Test_ShouldRecognizeLeaseCreatedIfBiddingIsSkipped(t *testing.T) {
 	require.Nil(t, broadcast)
 }
 
-type testBidPricingStrategy int64
-
-func (tbps testBidPricingStrategy) CalculatePrice(_ context.Context, _ string, gspec *dtypes.GroupSpec) (sdk.DecCoin, error) {
+func (tbps testBidPricingStrategy) CalculatePrice(_ context.Context, _ Request) (sdk.DecCoin, error) {
 	return sdk.NewInt64DecCoin(testutil.CoinDenom, int64(tbps)), nil
 }
 
@@ -640,11 +650,7 @@ func Test_BidOrderUsesBidPricingStrategy(t *testing.T) {
 	scaffold.cluster.AssertCalled(t, "Unreserve", scaffold.orderID, mock.Anything)
 }
 
-type alwaysFailsBidPricingStrategy struct {
-	failure error
-}
-
-func (afbps alwaysFailsBidPricingStrategy) CalculatePrice(_ context.Context, _ string, gspec *dtypes.GroupSpec) (sdk.DecCoin, error) {
+func (afbps alwaysFailsBidPricingStrategy) CalculatePrice(_ context.Context, _ Request) (sdk.DecCoin, error) {
 	return sdk.DecCoin{}, afbps.failure
 }
 

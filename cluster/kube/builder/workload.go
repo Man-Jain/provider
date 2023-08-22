@@ -4,15 +4,23 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/tendermint/tendermint/libs/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	maniv2beta1 "github.com/akash-network/node/manifest/v2beta1"
+	"github.com/tendermint/tendermint/libs/log"
+
 	"github.com/akash-network/node/sdl"
 	sdlutil "github.com/akash-network/node/sdl/util"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
+
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
+)
+
+const (
+	ResourceGPUNvidia = corev1.ResourceName("nvidia.com/gpu")
+	ResourceGPUAMD    = corev1.ResourceName("amd.com/gpu")
+	GPUVendorNvidia   = "nvidia"
+	GPUVendorAMD      = "amd"
 )
 
 type workloadBase interface {
@@ -20,35 +28,43 @@ type workloadBase interface {
 	Name() string
 }
 
-type workload struct {
+type Workload struct {
 	builder
-	service          *maniv2beta1.Service
-	runtimeClassName string
+	serviceIdx int
 }
 
-var _ workloadBase = (*workload)(nil)
+var _ workloadBase = (*Workload)(nil)
 
-func newWorkloadBuilder(log log.Logger, settings Settings, lid mtypes.LeaseID, group *maniv2beta1.Group, service *maniv2beta1.Service) workload {
-	return workload{
+func NewWorkloadBuilder(
+	log log.Logger,
+	settings Settings,
+	deployment IClusterDeployment,
+	serviceIdx int) Workload {
+	return Workload{
 		builder: builder{
-			settings: settings,
-			log:      log.With("module", "kube-builder"),
-			lid:      lid,
-			group:    group,
+			settings:   settings,
+			log:        log.With("module", "kube-builder"),
+			deployment: deployment,
 		},
-		service:          service,
-		runtimeClassName: settings.DeploymentRuntimeClass,
+		serviceIdx: serviceIdx,
 	}
 }
 
-func (b *workload) container() corev1.Container {
+func (b *Workload) Name() string {
+	return b.deployment.ManifestGroup().Services[b.serviceIdx].Name
+}
+
+func (b *Workload) container() corev1.Container {
 	falseValue := false
 
+	service := &b.deployment.ManifestGroup().Services[b.serviceIdx]
+	sparams := b.deployment.ClusterParams().SchedulerParams[b.serviceIdx]
+
 	kcontainer := corev1.Container{
-		Name:    b.service.Name,
-		Image:   b.service.Image,
-		Command: b.service.Command,
-		Args:    b.service.Args,
+		Name:    service.Name,
+		Image:   service.Image,
+		Command: service.Command,
+		Args:    service.Args,
 		Resources: corev1.ResourceRequirements{
 			Limits:   make(corev1.ResourceList),
 			Requests: make(corev1.ResourceList),
@@ -61,19 +77,40 @@ func (b *workload) container() corev1.Container {
 		},
 	}
 
-	if cpu := b.service.Resources.CPU; cpu != nil {
+	if cpu := service.Resources.CPU; cpu != nil {
 		requestedCPU := sdlutil.ComputeCommittedResources(b.settings.CPUCommitLevel, cpu.Units)
 		kcontainer.Resources.Requests[corev1.ResourceCPU] = resource.NewScaledQuantity(int64(requestedCPU.Value()), resource.Milli).DeepCopy()
 		kcontainer.Resources.Limits[corev1.ResourceCPU] = resource.NewScaledQuantity(int64(cpu.Units.Value()), resource.Milli).DeepCopy()
 	}
 
-	if mem := b.service.Resources.Memory; mem != nil {
+	if gpu := service.Resources.GPU; gpu != nil && gpu.Units.Value() > 0 {
+		var resourceName corev1.ResourceName
+
+		switch sparams.Resources.GPU.Vendor {
+		case GPUVendorNvidia:
+			resourceName = ResourceGPUNvidia
+		case GPUVendorAMD:
+			resourceName = ResourceGPUAMD
+		default:
+			panic("requested for unsupported GPU vendor")
+		}
+
+		// GPUs are only supposed to be specified in the limits section, which means
+		//  - can specify GPU limits without specifying requests, because Kubernetes will use the limit as the request value by default.
+		//  - can specify GPU in both limits and requests but these two values must be equal.
+		//  - cannot specify GPU requests without specifying limits.
+		requestedGPU := sdlutil.ComputeCommittedResources(b.settings.GPUCommitLevel, gpu.Units)
+		kcontainer.Resources.Requests[resourceName] = resource.NewQuantity(int64(requestedGPU.Value()), resource.DecimalSI).DeepCopy()
+		kcontainer.Resources.Limits[resourceName] = resource.NewQuantity(int64(gpu.Units.Value()), resource.DecimalSI).DeepCopy()
+	}
+
+	if mem := service.Resources.Memory; mem != nil {
 		requestedMem := sdlutil.ComputeCommittedResources(b.settings.MemoryCommitLevel, mem.Quantity)
 		kcontainer.Resources.Requests[corev1.ResourceMemory] = resource.NewQuantity(int64(requestedMem.Value()), resource.DecimalSI).DeepCopy()
 		kcontainer.Resources.Limits[corev1.ResourceMemory] = resource.NewQuantity(int64(mem.Quantity.Value()), resource.DecimalSI).DeepCopy()
 	}
 
-	for _, ephemeral := range b.service.Resources.Storage {
+	for _, ephemeral := range service.Resources.Storage {
 		attr := ephemeral.Attributes.Find(sdl.StorageAttributePersistent)
 		if persistent, _ := attr.AsBool(); !persistent {
 			requestedStorage := sdlutil.ComputeCommittedResources(b.settings.StorageCommitLevel, ephemeral.Quantity)
@@ -84,11 +121,11 @@ func (b *workload) container() corev1.Container {
 		}
 	}
 
-	if b.service.Params != nil {
-		for _, params := range b.service.Params.Storage {
+	if service.Params != nil {
+		for _, params := range service.Params.Storage {
 			kcontainer.VolumeMounts = append(kcontainer.VolumeMounts, corev1.VolumeMount{
 				// matches VolumeName in persistentVolumeClaims below
-				Name:      fmt.Sprintf("%s-%s", b.service.Name, params.Name),
+				Name:      fmt.Sprintf("%s-%s", service.Name, params.Name),
 				ReadOnly:  params.ReadOnly,
 				MountPath: params.Mount,
 			})
@@ -96,7 +133,7 @@ func (b *workload) container() corev1.Container {
 	}
 
 	envVarsAdded := make(map[string]int)
-	for _, env := range b.service.Env {
+	for _, env := range service.Env {
 		parts := strings.SplitN(env, "=", 2)
 		switch len(parts) {
 		case 2:
@@ -108,7 +145,7 @@ func (b *workload) container() corev1.Container {
 	}
 	kcontainer.Env = b.addEnvVarsForDeployment(envVarsAdded, kcontainer.Env)
 
-	for _, expose := range b.service.Expose {
+	for _, expose := range service.Expose {
 		kcontainer.Ports = append(kcontainer.Ports, corev1.ContainerPort{
 			ContainerPort: int32(expose.Port),
 		})
@@ -117,10 +154,12 @@ func (b *workload) container() corev1.Container {
 	return kcontainer
 }
 
-func (b *workload) persistentVolumeClaims() []corev1.PersistentVolumeClaim {
+func (b *Workload) persistentVolumeClaims() []corev1.PersistentVolumeClaim {
 	var pvcs []corev1.PersistentVolumeClaim // nolint:prealloc
 
-	for _, storage := range b.service.Resources.Storage {
+	service := &b.deployment.ManifestGroup().Services[b.serviceIdx]
+
+	for _, storage := range service.Resources.Storage {
 		attr := storage.Attributes.Find(sdl.StorageAttributePersistent)
 		if persistent, valid := attr.AsBool(); !valid || !persistent {
 			continue
@@ -129,7 +168,7 @@ func (b *workload) persistentVolumeClaims() []corev1.PersistentVolumeClaim {
 		volumeMode := corev1.PersistentVolumeFilesystem
 		pvc := corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: fmt.Sprintf("%s-%s", b.service.Name, storage.Name),
+				Name: fmt.Sprintf("%s-%s", service.Name, storage.Name),
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
@@ -156,17 +195,82 @@ func (b *workload) persistentVolumeClaims() []corev1.PersistentVolumeClaim {
 	return pvcs
 }
 
-func (b *workload) Name() string {
-	return b.service.Name
+func (b *Workload) runtimeClass() *string {
+	params := b.deployment.ClusterParams().SchedulerParams[b.serviceIdx]
+	var effectiveRuntimeClassName *string
+
+	if params != nil {
+		if len(params.RuntimeClass) != 0 && params.RuntimeClass != runtimeClassNoneValue {
+			runtimeClass := new(string)
+			*runtimeClass = params.RuntimeClass
+			effectiveRuntimeClassName = runtimeClass
+		}
+	}
+
+	return effectiveRuntimeClassName
 }
 
-func (b *workload) labels() map[string]string {
+func (b *Workload) replicas() *int32 {
+	replicas := new(int32)
+	*replicas = int32(b.deployment.ManifestGroup().Services[b.serviceIdx].Count)
+
+	return replicas
+}
+
+func (b *Workload) affinity() *corev1.Affinity {
+	svc := b.deployment.ClusterParams().SchedulerParams[b.serviceIdx]
+
+	if svc == nil || svc.Resources == nil {
+		return nil
+	}
+
+	selectors := nodeSelectorsFromResources(svc.Resources)
+	if len(selectors) == 0 {
+		return nil
+	}
+
+	affinity := &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchExpressions: selectors,
+					},
+				},
+			},
+		},
+	}
+
+	return affinity
+}
+
+func nodeSelectorsFromResources(res *crd.SchedulerResources) []corev1.NodeSelectorRequirement {
+	if res == nil {
+		return nil
+	}
+
+	var selectors []corev1.NodeSelectorRequirement
+
+	if gpu := res.GPU; gpu != nil {
+		selectors = append(selectors, corev1.NodeSelectorRequirement{
+			Key:      fmt.Sprintf("%s.vendor.%s.model.%s", AkashServiceCapabilityGPU, gpu.Vendor, gpu.Model),
+			Operator: "In",
+			Values: []string{
+				"true",
+			},
+		})
+	}
+
+	return selectors
+}
+
+func (b *Workload) labels() map[string]string {
 	obj := b.builder.labels()
-	obj[AkashManifestServiceLabelName] = b.service.Name
+	obj[AkashManifestServiceLabelName] = b.deployment.ManifestGroup().Services[b.serviceIdx].Name
 	return obj
 }
 
-func (b *workload) imagePullSecrets() []corev1.LocalObjectReference {
+func (b *Workload) imagePullSecrets() []corev1.LocalObjectReference {
 	if b.settings.DockerImagePullSecretsName == "" {
 		return nil
 	}
@@ -174,13 +278,16 @@ func (b *workload) imagePullSecrets() []corev1.LocalObjectReference {
 	return []corev1.LocalObjectReference{{Name: b.settings.DockerImagePullSecretsName}}
 }
 
-func (b *workload) addEnvVarsForDeployment(envVarsAlreadyAdded map[string]int, env []corev1.EnvVar) []corev1.EnvVar {
+func (b *Workload) addEnvVarsForDeployment(envVarsAlreadyAdded map[string]int, env []corev1.EnvVar) []corev1.EnvVar {
+	lid := b.deployment.LeaseID()
+
 	// Add each env. var. if it is not already set by the SDL
-	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashGroupSequence, b.lid.GetGSeq())
-	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashDeploymentSequence, b.lid.GetDSeq())
-	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashOrderSequence, b.lid.GetOSeq())
-	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashOwner, b.lid.Owner)
-	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashProvider, b.lid.Provider)
+	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashGroupSequence, lid.GetGSeq())
+	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashDeploymentSequence, lid.GetDSeq())
+	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashOrderSequence, lid.GetOSeq())
+	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashOwner, lid.Owner)
+	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashProvider, lid.Provider)
 	env = addIfNotPresent(envVarsAlreadyAdded, env, envVarAkashClusterPublicHostname, b.settings.ClusterPublicHostname)
+
 	return env
 }

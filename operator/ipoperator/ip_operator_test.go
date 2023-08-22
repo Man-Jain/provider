@@ -5,16 +5,17 @@ import (
 	"testing"
 	"time"
 
-	manifest "github.com/akash-network/node/manifest/v2beta1"
-	"github.com/akash-network/node/testutil"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	manifest "github.com/akash-network/akash-api/go/manifest/v2beta2"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
+	"github.com/akash-network/node/testutil"
+
 	"github.com/akash-network/provider/cluster/mocks"
-	"github.com/akash-network/provider/cluster/types/v1beta2"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	"github.com/akash-network/provider/operator/operatorcommon"
 )
 
@@ -99,7 +100,7 @@ type fakeIPEvent struct {
 	sharingKey   string
 	serviceName  string
 	protocol     manifest.ServiceProtocol
-	eventType    v1beta2.ProviderResourceEvent
+	eventType    ctypes.ProviderResourceEvent
 }
 
 func (fipe fakeIPEvent) GetLeaseID() mtypes.LeaseID {
@@ -124,7 +125,7 @@ func (fipe fakeIPEvent) GetProtocol() manifest.ServiceProtocol {
 	return fipe.protocol
 }
 
-func (fipe fakeIPEvent) GetEventType() v1beta2.ProviderResourceEvent {
+func (fipe fakeIPEvent) GetEventType() ctypes.ProviderResourceEvent {
 	return fipe.eventType
 }
 
@@ -134,7 +135,7 @@ func TestIPOperatorAddEvent(t *testing.T) {
 		leaseID := testutil.LeaseID(t)
 
 		s.metalMock.On("CreateIPPassthrough", mock.Anything,
-			v1beta2.ClusterIPPassthroughDirective{
+			ctypes.ClusterIPPassthroughDirective{
 				LeaseID:      leaseID,
 				ServiceName:  "aservice",
 				Port:         10000,
@@ -150,7 +151,7 @@ func TestIPOperatorAddEvent(t *testing.T) {
 			sharingKey:   "akey",
 			serviceName:  "aservice",
 			protocol:     manifest.TCP,
-			eventType:    v1beta2.ProviderResourceAdd,
+			eventType:    ctypes.ProviderResourceAdd,
 		})
 		require.NoError(t, err)
 	})
@@ -163,7 +164,7 @@ func TestIPOperatorUpdateEvent(t *testing.T) {
 		leaseID := testutil.LeaseID(t)
 
 		s.metalMock.On("CreateIPPassthrough", mock.Anything,
-			v1beta2.ClusterIPPassthroughDirective{
+			ctypes.ClusterIPPassthroughDirective{
 				LeaseID:      leaseID,
 				ServiceName:  "aservice",
 				Port:         10000,
@@ -179,7 +180,7 @@ func TestIPOperatorUpdateEvent(t *testing.T) {
 			sharingKey:   "akey",
 			serviceName:  "aservice",
 			protocol:     manifest.TCP,
-			eventType:    v1beta2.ProviderResourceUpdate,
+			eventType:    ctypes.ProviderResourceUpdate,
 		})
 		require.NoError(t, err)
 	})
@@ -191,7 +192,7 @@ func TestIPOperatorDeleteEvent(t *testing.T) {
 		leaseID := testutil.LeaseID(t)
 
 		s.metalMock.On("PurgeIPPassthrough", mock.Anything,
-			v1beta2.ClusterIPPassthroughDirective{
+			ctypes.ClusterIPPassthroughDirective{
 				LeaseID:      leaseID,
 				ServiceName:  "aservice",
 				Port:         10000,
@@ -207,7 +208,7 @@ func TestIPOperatorDeleteEvent(t *testing.T) {
 			sharingKey:   "akey",
 			serviceName:  "aservice",
 			protocol:     manifest.TCP,
-			eventType:    v1beta2.ProviderResourceDelete,
+			eventType:    ctypes.ProviderResourceDelete,
 		})
 		require.NoError(t, err)
 	})
@@ -223,7 +224,7 @@ func TestIPOperatorGivesUpOnErrors(t *testing.T) {
 		leaseID := testutil.LeaseID(t)
 
 		s.metalMock.On("CreateIPPassthrough", mock.Anything,
-			v1beta2.ClusterIPPassthroughDirective{
+			ctypes.ClusterIPPassthroughDirective{
 				LeaseID:      leaseID,
 				ServiceName:  "aservice",
 				Port:         10000,
@@ -241,7 +242,7 @@ func TestIPOperatorGivesUpOnErrors(t *testing.T) {
 			sharingKey:   "akey",
 			serviceName:  "aservice",
 			protocol:     manifest.TCP,
-			eventType:    v1beta2.ProviderResourceAdd,
+			eventType:    ctypes.ProviderResourceAdd,
 		}
 		for i := uint(0); i != s.ilc.FailureLimit; i++ {
 			err := s.op.applyEvent(ctx, fakeEvent)
@@ -259,7 +260,7 @@ func TestIPOperatorRun(t *testing.T) {
 	runIPOperator(t, true, func(ctx context.Context, s ipOperatorScaffold) {
 		s.metalMock.On("GetIPPassthroughs", mock.Anything).Return(nil, nil)
 		s.metalMock.On("GetIPAddressUsage", mock.Anything).Return(uint(0), uint(3), nil)
-		events := make(chan v1beta2.IPResourceEvent)
+		events := make(chan ctypes.IPResourceEvent)
 		go func() {
 			select {
 			case events <- fakeIPEvent{
@@ -269,7 +270,7 @@ func TestIPOperatorRun(t *testing.T) {
 				sharingKey:   "akey",
 				serviceName:  "aservice",
 				protocol:     "UDP",
-				eventType:    v1beta2.ProviderResourceAdd,
+				eventType:    ctypes.ProviderResourceAdd,
 			}:
 			case <-ctx.Done():
 				return
@@ -281,12 +282,12 @@ func TestIPOperatorRun(t *testing.T) {
 			}
 		}()
 		// nolint: golint, gosimple
-		var eventsRead <-chan v1beta2.IPResourceEvent
+		var eventsRead <-chan ctypes.IPResourceEvent
 		eventsRead = events
 		s.clusterMock.On("ObserveIPState", mock.Anything).Return(eventsRead, nil)
 
 		s.metalMock.On("CreateIPPassthrough", mock.Anything,
-			v1beta2.ClusterIPPassthroughDirective{
+			ctypes.ClusterIPPassthroughDirective{
 				LeaseID:      leaseID,
 				ServiceName:  "aservice",
 				Port:         101,

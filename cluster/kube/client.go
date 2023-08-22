@@ -2,39 +2,40 @@ package kube
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"runtime/debug"
 	"strings"
 
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/tendermint/tendermint/libs/log"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
-
-	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
-
-	manifest "github.com/akash-network/node/manifest/v2beta1"
-	"github.com/akash-network/node/sdl"
-	sdlutil "github.com/akash-network/node/sdl/util"
-	metricsutils "github.com/akash-network/node/util/metrics"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
-
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/util/flowcontrol"
+	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
+
+	mapi "github.com/akash-network/akash-api/go/manifest/v2beta2"
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
+	"github.com/akash-network/node/sdl"
+	metricsutils "github.com/akash-network/node/util/metrics"
 
 	"github.com/akash-network/provider/cluster"
 	"github.com/akash-network/provider/cluster/kube/builder"
 	"github.com/akash-network/provider/cluster/kube/clientcommon"
 	kubeclienterrors "github.com/akash-network/provider/cluster/kube/errors"
-	ctypes "github.com/akash-network/provider/cluster/types/v1beta2"
-	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta1"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
 	akashclient "github.com/akash-network/provider/pkg/client/clientset/versioned"
 )
 
@@ -64,33 +65,45 @@ func (c *client) String() string {
 	return fmt.Sprintf("kube client %p ns=%s", c, c.ns)
 }
 
+func wrapKubeCall[T any](label string, fn func() (T, error)) (T, error) {
+	res, err := fn()
+
+	status := metricsutils.SuccessLabel
+	if err != nil {
+		status = metricsutils.FailLabel
+	}
+	kubeCallsCounter.WithLabelValues(label, status).Inc()
+
+	return res, err
+}
+
 // NewClient returns new Kubernetes Client instance with provided logger, host and ns. Returns error in-case of failure
 // configPath may be the empty string
 func NewClient(ctx context.Context, log log.Logger, ns string, configPath string) (Client, error) {
 	config, err := clientcommon.OpenKubeConfig(configPath, log)
 	if err != nil {
-		return nil, errors.Wrap(err, "kube: error building config flags")
+		return nil, fmt.Errorf("kube: error building config flags: %w", err)
 	}
 	config.RateLimiter = flowcontrol.NewFakeAlwaysRateLimiter()
 
 	kc, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		return nil, errors.Wrap(err, "kube: error creating kubernetes client")
+		return nil, fmt.Errorf("kube: error creating kubernetes client: %w", err)
 	}
 
 	_, err = kc.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
 	if err != nil {
-		return nil, errors.Wrap(err, "kube: unable to fetch leases namespace")
+		return nil, fmt.Errorf("kube: unable to fetch leases namespace: %w", err)
 	}
 
 	mc, err := akashclient.NewForConfig(config)
 	if err != nil {
-		return nil, errors.Wrap(err, "kube: error creating manifest client")
+		return nil, fmt.Errorf("kube: error creating manifest client: %w", err)
 	}
 
 	metc, err := metricsclient.NewForConfig(config)
 	if err != nil {
-		return nil, errors.Wrap(err, "kube: error creating metrics client")
+		return nil, fmt.Errorf("kube: error creating metrics client: %w", err)
 	}
 
 	return &client{
@@ -103,29 +116,31 @@ func NewClient(ctx context.Context, log log.Logger, ns string, configPath string
 	}, nil
 }
 
-func (c *client) GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.Deployment, error) {
+func (c *client) GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.IDeployment, error) {
 	labelSelectors := &strings.Builder{}
 	_, _ = fmt.Fprintf(labelSelectors, "%s=%d", builder.AkashLeaseDSeqLabelName, dID.DSeq)
 	_, _ = fmt.Fprintf(labelSelectors, ",%s=%s", builder.AkashLeaseOwnerLabelName, dID.Owner)
 
-	manifests, err := c.ac.AkashV2beta1().Manifests(c.ns).List(ctx, metav1.ListOptions{
-		TypeMeta:             metav1.TypeMeta{},
-		LabelSelector:        labelSelectors.String(),
-		FieldSelector:        "",
-		Watch:                false,
-		AllowWatchBookmarks:  false,
-		ResourceVersion:      "",
-		ResourceVersionMatch: "",
-		TimeoutSeconds:       nil,
-		Limit:                0,
-		Continue:             "",
+	manifests, err := wrapKubeCall("manifests-list", func() (*crd.ManifestList, error) {
+		return c.ac.AkashV2beta2().Manifests(c.ns).List(ctx, metav1.ListOptions{
+			TypeMeta:             metav1.TypeMeta{},
+			LabelSelector:        labelSelectors.String(),
+			FieldSelector:        "",
+			Watch:                false,
+			AllowWatchBookmarks:  false,
+			ResourceVersion:      "",
+			ResourceVersionMatch: "",
+			TimeoutSeconds:       nil,
+			Limit:                0,
+			Continue:             "",
+		})
 	})
 
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]ctypes.Deployment, len(manifests.Items))
+	result := make([]ctypes.IDeployment, len(manifests.Items))
 	for i, manifest := range manifests.Items {
 		result[i], err = manifest.Deployment()
 		if err != nil {
@@ -139,7 +154,10 @@ func (c *client) GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([
 func (c *client) GetManifestGroup(ctx context.Context, lID mtypes.LeaseID) (bool, crd.ManifestGroup, error) {
 	leaseNamespace := builder.LidNS(lID)
 
-	obj, err := c.ac.AkashV2beta1().Manifests(c.ns).Get(ctx, leaseNamespace, metav1.GetOptions{})
+	obj, err := wrapKubeCall("manifests-get", func() (*crd.Manifest, error) {
+		return c.ac.AkashV2beta2().Manifests(c.ns).Get(ctx, leaseNamespace, metav1.GetOptions{})
+	})
+
 	if err != nil {
 		if kubeErrors.IsNotFound(err) {
 			c.log.Info("CRD manifest not found", "lease-ns", leaseNamespace)
@@ -152,13 +170,16 @@ func (c *client) GetManifestGroup(ctx context.Context, lID mtypes.LeaseID) (bool
 	return true, obj.Spec.Group, nil
 }
 
-func (c *client) Deployments(ctx context.Context) ([]ctypes.Deployment, error) {
-	manifests, err := c.ac.AkashV2beta1().Manifests(c.ns).List(ctx, metav1.ListOptions{})
+func (c *client) Deployments(ctx context.Context) ([]ctypes.IDeployment, error) {
+	manifests, err := wrapKubeCall("manifests-list", func() (*crd.ManifestList, error) {
+		return c.ac.AkashV2beta2().Manifests(c.ns).List(ctx, metav1.ListOptions{})
+	})
+
 	if err != nil {
 		return nil, err
 	}
 
-	deployments := make([]ctypes.Deployment, 0, len(manifests.Items))
+	deployments := make([]ctypes.IDeployment, 0, len(manifests.Items))
 	for _, manifest := range manifests.Items {
 		deployment, err := manifest.Deployment()
 		if err != nil {
@@ -170,38 +191,88 @@ func (c *client) Deployments(ctx context.Context) ([]ctypes.Deployment, error) {
 	return deployments, nil
 }
 
-func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest.Group) error {
-	settingsI := ctx.Value(builder.SettingsKey)
-	if nil == settingsI {
-		return kubeclienterrors.ErrNotConfiguredWithSettings
-	}
-	settings := settingsI.(builder.Settings)
-	if err := builder.ValidateSettings(settings); err != nil {
-		return err
+type deploymentService struct {
+	deployment    builder.Deployment
+	statefulSet   builder.StatefulSet
+	localService  builder.Service
+	globalService builder.Service
+}
+
+type deploymentApplies struct {
+	ns        builder.NS
+	netPol    builder.NetPol
+	cmanifest builder.Manifest
+	services  []*deploymentService
+}
+
+func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err error) {
+	var settings builder.Settings
+	var valid bool
+
+	if settings, valid = ctx.Value(builder.SettingsKey).(builder.Settings); !valid {
+		err = kubeclienterrors.ErrNotConfiguredWithSettings
+		return
 	}
 
-	if err := applyNS(ctx, c.kc, builder.BuildNS(settings, lid, group)); err != nil {
-		c.log.Error("applying namespace", "err", err, "lease", lid)
-		return err
+	if err = builder.ValidateSettings(settings); err != nil {
+		return
 	}
 
-	if err := applyNetPolicies(ctx, c.kc, builder.BuildNetPol(settings, lid, group)); err != nil { //
-		c.log.Error("applying namespace network policies", "err", err, "lease", lid)
-		return err
+	var cdeployment builder.IClusterDeployment
+
+	if cdeployment, err = builder.ClusterDeploymentFromDeployment(deployment); err != nil {
+		if cdeployment != nil {
+			tMani := builder.BuildManifest(c.log, settings, c.ns, cdeployment)
+
+			if cr, er := tMani.Create(); er == nil {
+				data, _ := json.Marshal(cr)
+				c.log.Error(fmt.Sprintf("debug manifest %s", string(data)))
+			}
+		}
+
+		return
 	}
 
-	if err := applyManifest(ctx, c.ac, builder.BuildManifest(c.log, settings, c.ns, lid, group)); err != nil {
-		c.log.Error("applying manifest", "err", err, "lease", lid)
-		return err
+	lid := cdeployment.LeaseID()
+	group := cdeployment.ManifestGroup()
+
+	applies := deploymentApplies{
+		services: make([]*deploymentService, 0, len(group.Services)),
 	}
 
-	if err := cleanupStaleResources(ctx, c.kc, lid, group); err != nil {
-		c.log.Error("cleaning stale resources", "err", err, "lease", lid)
-		return err
-	}
+	defer func() {
+		tmpErr := err
+
+		if recover() != nil {
+			c.log.Error(fmt.Sprintf("recovered from panic: \n%s", string(debug.Stack())))
+			err = kubeclienterrors.ErrInternalError
+		}
+
+		if tmpErr != nil || err != nil {
+			var dArgs []any
+			var dMsg string
+
+			applyMsgLog := func(msg string, arg any) {
+				dMsg += msg
+				dArgs = append(dArgs, arg)
+			}
+
+			applyMsgLog("unable to deploy lid=%s. last known state:\n", lid)
+
+			c.log.Error(fmt.Sprintf(dMsg, dArgs...))
+		}
+	}()
+
+	applies.ns = builder.BuildNS(settings, cdeployment)
+	applies.netPol = builder.BuildNetPol(settings, cdeployment)
+	applies.cmanifest = builder.BuildManifest(c.log, settings, c.ns, cdeployment)
 
 	for svcIdx := range group.Services {
+		workload := builder.NewWorkloadBuilder(c.log, settings, cdeployment, svcIdx)
+
 		service := &group.Services[svcIdx]
+
+		svc := &deploymentService{}
 
 		persistent := false
 		for i := range service.Resources.Storage {
@@ -212,33 +283,70 @@ func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest
 		}
 
 		if persistent {
-			if err := applyStatefulSet(ctx, c.kc, builder.BuildStatefulSet(c.log, settings, lid, group, service)); err != nil {
+			svc.statefulSet = builder.BuildStatefulSet(workload)
+		} else {
+			svc.deployment = builder.NewDeployment(workload)
+		}
+
+		applies.services = append(applies.services, svc)
+
+		if len(service.Expose) == 0 {
+			c.log.Debug("lease does not have services (no expose configuration provided)", "lease", lid, "service", service.Name)
+			continue
+		}
+
+		svc.localService = builder.BuildService(workload, false)
+		svc.globalService = builder.BuildService(workload, true)
+	}
+
+	if err := applyNS(ctx, c.kc, applies.ns); err != nil {
+		c.log.Error("applying namespace", "err", err, "lease", lid)
+		return err
+	}
+
+	if err := applyNetPolicies(ctx, c.kc, applies.netPol); err != nil { //
+		c.log.Error("applying namespace network policies", "err", err, "lease", lid)
+		return err
+	}
+
+	err = applyManifest(ctx, c.ac, applies.cmanifest)
+	if err != nil {
+		c.log.Error("applying manifest", "err", err, "lease", lid)
+		return err
+	}
+
+	if err = cleanupStaleResources(ctx, c.kc, lid, group); err != nil {
+		c.log.Error("cleaning stale resources", "err", err, "lease", lid)
+		return err
+	}
+
+	for svcIdx := range group.Services {
+		applyObjs := applies.services[svcIdx]
+		service := &group.Services[svcIdx]
+
+		if applyObjs.statefulSet != nil {
+			if err = applyStatefulSet(ctx, c.kc, applyObjs.statefulSet); err != nil {
 				c.log.Error("applying statefulSet", "err", err, "lease", lid, "service", service.Name)
 				return err
 			}
-		} else {
-			if err := applyDeployment(ctx, c.kc, builder.NewDeployment(c.log, settings, lid, group, service)); err != nil {
+		}
+
+		if applyObjs.deployment != nil {
+			if err = applyDeployment(ctx, c.kc, applyObjs.deployment); err != nil {
 				c.log.Error("applying deployment", "err", err, "lease", lid, "service", service.Name)
 				return err
 			}
 		}
 
-		if len(service.Expose) == 0 {
-			c.log.Debug("no services", "lease", lid, "service", service.Name)
-			continue
-		}
-
-		serviceBuilderLocal := builder.BuildService(c.log, settings, lid, group, service, false)
-		if serviceBuilderLocal.Any() {
-			if err := applyService(ctx, c.kc, serviceBuilderLocal); err != nil {
+		if lsvc := applyObjs.localService; lsvc != nil && lsvc.Any() {
+			if err = applyService(ctx, c.kc, lsvc); err != nil {
 				c.log.Error("applying local service", "err", err, "lease", lid, "service", service.Name)
 				return err
 			}
 		}
 
-		serviceBuilderGlobal := builder.BuildService(c.log, settings, lid, group, service, true)
-		if serviceBuilderGlobal.Any() {
-			if err := applyService(ctx, c.kc, serviceBuilderGlobal); err != nil {
+		if gsvc := applyObjs.globalService; gsvc != nil && gsvc.Any() {
+			if err = applyService(ctx, c.kc, gsvc); err != nil {
 				c.log.Error("applying global service", "err", err, "lease", lid, "service", service.Name)
 				return err
 			}
@@ -249,15 +357,20 @@ func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest
 }
 
 func (c *client) TeardownLease(ctx context.Context, lid mtypes.LeaseID) error {
-	result := c.kc.CoreV1().Namespaces().Delete(ctx, builder.LidNS(lid), metav1.DeleteOptions{})
+	_, result := wrapKubeCall("namespaces-delete", func() (interface{}, error) {
+		return nil, c.kc.CoreV1().Namespaces().Delete(ctx, builder.LidNS(lid), metav1.DeleteOptions{})
+	})
 
-	label := metricsutils.SuccessLabel
 	if result != nil {
-		label = metricsutils.FailLabel
+		c.log.Error("teardown lease: unable to delete namespace", "ns", builder.LidNS(lid), "error", result)
+		if kerrors.IsNotFound(result) {
+			result = nil
+		}
 	}
-	kubeCallsCounter.WithLabelValues("namespaces-delete", label).Inc()
+	_, err := wrapKubeCall("manifests-delete", func() (interface{}, error) {
+		return nil, c.ac.AkashV2beta2().Manifests(c.ns).Delete(ctx, builder.LidNS(lid), metav1.DeleteOptions{})
+	})
 
-	err := c.ac.AkashV2beta1().Manifests(c.ns).Delete(ctx, builder.LidNS(lid), metav1.DeleteOptions{})
 	if err != nil {
 		c.log.Error("teardown lease: unable to delete manifest", "ns", builder.LidNS(lid), "error", err)
 	}
@@ -331,24 +444,20 @@ func (c *client) LeaseEvents(ctx context.Context, lid mtypes.LeaseID, services s
 
 	var wtch ctypes.EventsWatcher
 	if follow {
-		watcher, err := c.kc.EventsV1().Events(builder.LidNS(lid)).Watch(ctx, listOpts)
-		label := metricsutils.SuccessLabel
-		if err != nil {
-			label = metricsutils.FailLabel
-		}
-		kubeCallsCounter.WithLabelValues("events-follow", label).Inc()
+		watcher, err := wrapKubeCall("events-follow", func() (watch.Interface, error) {
+			return c.kc.EventsV1().Events(builder.LidNS(lid)).Watch(ctx, listOpts)
+		})
+
 		if err != nil {
 			return nil, err
 		}
 
 		wtch = newEventsFeedWatch(ctx, watcher)
 	} else {
-		list, err := c.kc.EventsV1().Events(builder.LidNS(lid)).List(ctx, listOpts)
-		label := metricsutils.SuccessLabel
-		if err != nil {
-			label = metricsutils.FailLabel
-		}
-		kubeCallsCounter.WithLabelValues("events-list", label).Inc()
+		list, err := wrapKubeCall("events-list", func() (*eventsv1.EventList, error) {
+			return c.kc.EventsV1().Events(builder.LidNS(lid)).List(ctx, listOpts)
+		})
+
 		if err != nil {
 			return nil, err
 		}
@@ -370,33 +479,28 @@ func (c *client) LeaseLogs(ctx context.Context, lid mtypes.LeaseID,
 		listOpts.LabelSelector = fmt.Sprintf(builder.AkashManifestServiceLabelName+" in (%s)", services)
 	}
 
-	c.log.Error("filtering pods", "labelSelector", listOpts.LabelSelector)
+	c.log.Info("filtering pods", "labelSelector", listOpts.LabelSelector)
 
-	pods, err := c.kc.CoreV1().Pods(builder.LidNS(lid)).List(ctx, listOpts)
-	label := metricsutils.SuccessLabel
-	if err != nil {
-		label = metricsutils.FailLabel
-	}
-	kubeCallsCounter.WithLabelValues("pods-list", label).Inc()
+	pods, err := wrapKubeCall("pods-list", func() (*corev1.PodList, error) {
+		return c.kc.CoreV1().Pods(builder.LidNS(lid)).List(ctx, listOpts)
+	})
 	if err != nil {
 		c.log.Error("listing pods", "err", err)
-		return nil, errors.Wrap(err, kubeclienterrors.ErrInternalError.Error())
+		return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 	streams := make([]*ctypes.ServiceLog, len(pods.Items))
 	for i, pod := range pods.Items {
-		stream, err := c.kc.CoreV1().Pods(builder.LidNS(lid)).GetLogs(pod.Name, &corev1.PodLogOptions{
-			Follow:     follow,
-			TailLines:  tailLines,
-			Timestamps: false,
-		}).Stream(ctx)
-		label := metricsutils.SuccessLabel
-		if err != nil {
-			label = metricsutils.FailLabel
-		}
-		kubeCallsCounter.WithLabelValues("pods-getlogs", label).Inc()
+		stream, err := wrapKubeCall("pods-getlogs", func() (io.ReadCloser, error) {
+			return c.kc.CoreV1().Pods(builder.LidNS(lid)).GetLogs(pod.Name, &corev1.PodLogOptions{
+				Follow:     follow,
+				TailLines:  tailLines,
+				Timestamps: false,
+			}).Stream(ctx)
+		})
+
 		if err != nil {
 			c.log.Error("get pod logs", "err", err)
-			return nil, errors.Wrap(err, kubeclienterrors.ErrInternalError.Error())
+			return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 		}
 		streams[i] = cluster.NewServiceLog(pod.Name, stream)
 	}
@@ -413,16 +517,12 @@ func (c *client) ForwardedPortStatus(ctx context.Context, leaseID mtypes.LeaseID
 		return nil, err
 	}
 
-	services, err := c.kc.CoreV1().Services(builder.LidNS(leaseID)).List(ctx, metav1.ListOptions{})
-
-	label := metricsutils.SuccessLabel
-	if err != nil {
-		label = metricsutils.FailLabel
-	}
-	kubeCallsCounter.WithLabelValues("services-list", label).Inc()
+	services, err := wrapKubeCall("services-list", func() (*corev1.ServiceList, error) {
+		return c.kc.CoreV1().Services(builder.LidNS(leaseID)).List(ctx, metav1.ListOptions{})
+	})
 	if err != nil {
 		c.log.Error("list services", "err", err)
-		return nil, errors.Wrap(err, kubeclienterrors.ErrInternalError.Error())
+		return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 
 	forwardedPorts := make(map[string][]ctypes.ForwardedPortStatus)
@@ -451,9 +551,9 @@ func (c *client) ForwardedPortStatus(ctx context.Context, leaseID mtypes.LeaseID
 						isValid := true
 						switch port.Protocol {
 						case corev1.ProtocolTCP:
-							v.Proto = manifest.TCP
+							v.Proto = mapi.TCP
 						case corev1.ProtocolUDP:
-							v.Proto = manifest.UDP
+							v.Proto = mapi.UDP
 						default:
 							isValid = false // Skip this, since the Protocol is set to something not supported by Akash
 						}
@@ -470,7 +570,7 @@ func (c *client) ForwardedPortStatus(ctx context.Context, leaseID mtypes.LeaseID
 	return forwardedPorts, nil
 }
 
-// todo: limit number of results and do pagination / streaming
+// LeaseStatus todo: limit number of results and do pagination / streaming
 func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (map[string]*ctypes.ServiceStatus, error) {
 	settingsI := ctx.Value(builder.SettingsKey)
 	if nil == settingsI {
@@ -489,10 +589,11 @@ func (c *client) LeaseStatus(ctx context.Context, lid mtypes.LeaseID) (map[strin
 	kubeSelectorForLease(labelSelector, lid)
 	// Note: this is a separate call to the Kubernetes API to get this data. It could
 	// be a separate method on the interface entirely
-	phResult, err := c.ac.AkashV2beta1().ProviderHosts(c.ns).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector.String(),
+	phResult, err := wrapKubeCall("providerhosts-list", func() (*crd.ProviderHostList, error) {
+		return c.ac.AkashV2beta2().ProviderHosts(c.ns).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector.String(),
+		})
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -516,7 +617,10 @@ func (c *client) ServiceStatus(ctx context.Context, lid mtypes.LeaseID, name str
 
 	// Get manifest definition from CRD
 	c.log.Debug("Pulling manifest from CRD", "lease-ns", builder.LidNS(lid))
-	mani, err := c.ac.AkashV2beta1().Manifests(c.ns).Get(ctx, builder.LidNS(lid), metav1.GetOptions{})
+	mani, err := wrapKubeCall("manifests-list", func() (*crd.Manifest, error) {
+		return c.ac.AkashV2beta2().Manifests(c.ns).Get(ctx, builder.LidNS(lid), metav1.GetOptions{})
+	})
+
 	if err != nil {
 		c.log.Error("CRD manifest not found", "lease-ns", builder.LidNS(lid), "name", name)
 		return nil, kubeclienterrors.ErrNoManifestForLease
@@ -541,16 +645,13 @@ func (c *client) ServiceStatus(ctx context.Context, lid mtypes.LeaseID, name str
 
 	if isDeployment {
 		c.log.Debug("get deployment", "lease-ns", builder.LidNS(lid), "name", name)
-		deployment, err := c.kc.AppsV1().Deployments(builder.LidNS(lid)).Get(ctx, name, metav1.GetOptions{})
-		label := metricsutils.SuccessLabel
-		if err != nil {
-			label = metricsutils.FailLabel
-		}
-		kubeCallsCounter.WithLabelValues("deployments-get", label).Inc()
+		deployment, err := wrapKubeCall("deployments-get", func() (*appsv1.Deployment, error) {
+			return c.kc.AppsV1().Deployments(builder.LidNS(lid)).Get(ctx, name, metav1.GetOptions{})
+		})
 
 		if err != nil {
 			c.log.Error("deployment get", "err", err)
-			return nil, errors.Wrap(err, kubeclienterrors.ErrInternalError.Error())
+			return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 		}
 		if deployment == nil {
 			c.log.Error("no deployment found", "name", name)
@@ -569,16 +670,13 @@ func (c *client) ServiceStatus(ctx context.Context, lid mtypes.LeaseID, name str
 		}
 	} else {
 		c.log.Debug("get statefulsets", "lease-ns", builder.LidNS(lid), "name", name)
-		statefulset, err := c.kc.AppsV1().StatefulSets(builder.LidNS(lid)).Get(ctx, name, metav1.GetOptions{})
-		label := metricsutils.SuccessLabel
-		if err != nil {
-			label = metricsutils.FailLabel
-		}
-		kubeCallsCounter.WithLabelValues("statefulsets-get", label).Inc()
+		statefulset, err := wrapKubeCall("statefulsets-get", func() (*appsv1.StatefulSet, error) {
+			return c.kc.AppsV1().StatefulSets(builder.LidNS(lid)).Get(ctx, name, metav1.GetOptions{})
+		})
 
 		if err != nil {
 			c.log.Error("statefulsets get", "err", err)
-			return nil, errors.Wrap(err, kubeclienterrors.ErrInternalError.Error())
+			return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 		}
 		if statefulset == nil {
 			c.log.Error("no statefulsets found", "name", name)
@@ -606,19 +704,19 @@ exposeCheckLoop:
 			found = true
 			for _, expose := range service.Expose {
 
-				proto, err := manifest.ParseServiceProtocol(expose.Proto)
+				proto, err := mapi.ParseServiceProtocol(expose.Proto)
 				if err != nil {
 					return nil, err
 				}
-				mse := manifest.ServiceExpose{
-					Port:         expose.Port,
-					ExternalPort: expose.ExternalPort,
+				mse := mapi.ServiceExpose{
+					Port:         uint32(expose.Port),
+					ExternalPort: uint32(expose.ExternalPort),
 					Proto:        proto,
 					Service:      expose.Service,
 					Global:       expose.Global,
 					Hosts:        expose.Hosts,
 				}
-				if sdlutil.ShouldBeIngress(mse) {
+				if mse.IsIngress() {
 					hasHostnames = true
 					break exposeCheckLoop
 				}
@@ -636,47 +734,40 @@ exposeCheckLoop:
 		labelSelector := &strings.Builder{}
 		kubeSelectorForLease(labelSelector, lid)
 
-		phs, err := c.ac.AkashV2beta1().ProviderHosts(c.ns).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector.String(),
+		phs, err := wrapKubeCall("provider-hosts", func() (*crd.ProviderHostList, error) {
+			return c.ac.AkashV2beta2().ProviderHosts(c.ns).List(ctx, metav1.ListOptions{
+				LabelSelector: labelSelector.String(),
+			})
 		})
 
-		if hasHostnames {
-			label := metricsutils.SuccessLabel
-			if err != nil {
-				label = metricsutils.FailLabel
-			}
-			kubeCallsCounter.WithLabelValues("provider-hosts", label).Inc()
-			if err != nil {
-				c.log.Error("provider hosts get", "err", err)
-				return nil, errors.Wrap(err, kubeclienterrors.ErrInternalError.Error())
-			}
-
-			hosts := make([]string, 0, len(phs.Items))
-			for _, ph := range phs.Items {
-				hosts = append(hosts, ph.Spec.Hostname)
-			}
-
-			result.URIs = hosts
+		if err != nil {
+			c.log.Error("provider hosts get", "err", err)
+			return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 		}
+
+		hosts := make([]string, 0, len(phs.Items))
+		for _, ph := range phs.Items {
+			hosts = append(hosts, ph.Spec.Hostname)
+		}
+
+		result.URIs = hosts
 	}
 
 	return result, nil
 }
 
 func (c *client) leaseExists(ctx context.Context, lid mtypes.LeaseID) error {
-	_, err := c.kc.CoreV1().Namespaces().Get(ctx, builder.LidNS(lid), metav1.GetOptions{})
-	label := metricsutils.SuccessLabel
-	if err != nil && !kubeErrors.IsNotFound(err) {
-		label = metricsutils.FailLabel
-	}
-	kubeCallsCounter.WithLabelValues("namespace-get", label).Inc()
+	_, err := wrapKubeCall("namespace-get", func() (*corev1.Namespace, error) {
+		return c.kc.CoreV1().Namespaces().Get(ctx, builder.LidNS(lid), metav1.GetOptions{})
+	})
+
 	if err != nil {
 		if kubeErrors.IsNotFound(err) {
 			return kubeclienterrors.ErrLeaseNotFound
 		}
 
 		c.log.Error("namespaces get", "err", err)
-		return errors.Wrap(err, kubeclienterrors.ErrInternalError.Error())
+		return fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 
 	return nil
@@ -687,26 +778,22 @@ func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) (m
 		return nil, err
 	}
 
-	deployments, err := c.kc.AppsV1().Deployments(builder.LidNS(lid)).List(ctx, metav1.ListOptions{})
-	label := metricsutils.SuccessLabel
-	if err != nil {
-		label = metricsutils.FailLabel
-	}
-	kubeCallsCounter.WithLabelValues("deployments-list", label).Inc()
+	deployments, err := wrapKubeCall("deployments-list", func() (*appsv1.DeploymentList, error) {
+		return c.kc.AppsV1().Deployments(builder.LidNS(lid)).List(ctx, metav1.ListOptions{})
+	})
+
 	if err != nil {
 		c.log.Error("deployments list", "err", err)
-		return nil, errors.Wrap(err, kubeclienterrors.ErrInternalError.Error())
+		return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 
-	statefulsets, err := c.kc.AppsV1().StatefulSets(builder.LidNS(lid)).List(ctx, metav1.ListOptions{})
-	label = metricsutils.SuccessLabel
-	if err != nil {
-		label = metricsutils.FailLabel
-	}
-	kubeCallsCounter.WithLabelValues("statefulsets-list", label).Inc()
+	statefulsets, err := wrapKubeCall("statefulsets-list", func() (*appsv1.StatefulSetList, error) {
+		return c.kc.AppsV1().StatefulSets(builder.LidNS(lid)).List(ctx, metav1.ListOptions{})
+	})
+
 	if err != nil {
 		c.log.Error("statefulsets list", "err", err)
-		return nil, errors.Wrap(err, kubeclienterrors.ErrInternalError.Error())
+		return nil, fmt.Errorf("%s: %w", kubeclienterrors.ErrInternalError.Error(), err)
 	}
 
 	serviceStatus := make(map[string]*ctypes.ServiceStatus)
@@ -750,5 +837,7 @@ func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) (m
 }
 
 func (c *client) KubeVersion() (*version.Info, error) {
-	return c.kc.Discovery().ServerVersion()
+	return wrapKubeCall("discovery-serverversion", func() (*version.Info, error) {
+		return c.kc.Discovery().ServerVersion()
+	})
 }

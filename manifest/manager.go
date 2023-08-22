@@ -12,15 +12,18 @@ import (
 
 	"github.com/tendermint/tendermint/libs/log"
 
-	maniv2beta1 "github.com/akash-network/node/manifest/v2beta1"
+	maniv2beta2 "github.com/akash-network/akash-api/go/manifest/v2beta2"
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
 	"github.com/akash-network/node/pubsub"
-	"github.com/akash-network/node/sdl"
-	sdlutil "github.com/akash-network/node/sdl/util"
 	"github.com/akash-network/node/util/runner"
+<<<<<<< HEAD
 	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
 	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
+=======
+>>>>>>> 4e5a60f120edd7750533089b960e7fe0c72bd2d6
 
-	clustertypes "github.com/akash-network/provider/cluster/types/v1beta2"
+	clustertypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	"github.com/akash-network/provider/event"
 	"github.com/akash-network/provider/session"
 )
@@ -79,7 +82,7 @@ type manager struct {
 	data            dtypes.QueryDeploymentResponse
 	requests        []manifestRequest
 	pendingRequests []manifestRequest
-	manifests       []*maniv2beta1.Manifest
+	manifests       []*maniv2beta2.Manifest
 	versions        [][]byte
 
 	localLeases []event.LeaseWon
@@ -375,7 +378,7 @@ func (m *manager) validateRequests() {
 		return
 	}
 
-	manifests := make([]*maniv2beta1.Manifest, 0)
+	manifests := make([]*maniv2beta2.Manifest, 0)
 	for _, req := range m.requests {
 		// If the request context is complete then skip processing it
 		select {
@@ -384,7 +387,7 @@ func (m *manager) validateRequests() {
 		default:
 		}
 		if err := m.validateRequest(req); err != nil {
-			m.log.Error("invalid manifest", "err", err)
+			m.log.Error("invalid manifest: %s", err.Error())
 			req.ch <- err
 			continue
 		}
@@ -392,8 +395,8 @@ func (m *manager) validateRequests() {
 
 		// The manifest has been grabbed from the request but not published yet, store this response
 		m.pendingRequests = append(m.pendingRequests, req)
-
 	}
+
 	m.requests = nil // all requests processed at this time
 
 	m.log.Debug("requests valid", "num-requests", len(manifests))
@@ -413,7 +416,7 @@ func (m *manager) validateRequest(req manifestRequest) error {
 
 	// ensure that an uploaded manifest matches the hash declared on
 	// the Akash Deployment.Version
-	version, err := sdl.ManifestVersion(req.value.Manifest)
+	version, err := req.value.Manifest.Version()
 	if err != nil {
 		return err
 	}
@@ -438,12 +441,16 @@ func (m *manager) validateRequest(req manifestRequest) error {
 	// if err = validation.ValidateManifestWithDeployment(&req.value.Manifest, m.data.Groups); err != nil {
 	// 	return err
 	// }
+	if err = req.value.Manifest.CheckAgainstDeployment(m.data.Groups); err != nil {
+		return err
+	}
 
 	groupNames := make([]string, 0)
 
 	for _, lease := range m.localLeases {
 		groupNames = append(groupNames, lease.Group.GroupSpec.Name)
 	}
+
 	// Check that hostnames are not in use
 	if err = m.checkHostnamesForManifest(req.value.Manifest, groupNames); err != nil {
 		return err
@@ -452,7 +459,7 @@ func (m *manager) validateRequest(req manifestRequest) error {
 	return nil
 }
 
-func (m *manager) checkHostnamesForManifest(requestManifest maniv2beta1.Manifest, groupNames []string) error {
+func (m *manager) checkHostnamesForManifest(requestManifest maniv2beta2.Manifest, groupNames []string) error {
 	// Check if the hostnames are available. Do not block forever
 	ownerAddr, err := m.data.GetDeployment().DeploymentID.GetOwnerAddress()
 	if err != nil {
@@ -468,15 +475,16 @@ func (m *manager) checkHostnamesForManifest(requestManifest maniv2beta1.Manifest
 				continue
 			}
 
-			allHostnames = append(allHostnames, sdlutil.AllHostnamesOfManifestGroup(mgroup)...)
+			allHostnames = append(allHostnames, AllHostnamesOfManifestGroup(mgroup)...)
 			if !m.config.HTTPServicesRequireAtLeastOneHost {
 				continue
 			}
 			// For each service that exposes via an Ingress, then require a hsotname
 			for _, service := range mgroup.Services {
 				for _, expose := range service.Expose {
-					if sdlutil.ShouldBeIngress(expose) && len(expose.Hosts) == 0 {
-						return fmt.Errorf("%w: service %q exposed on %d:%s must have a hostname", errManifestRejected, service.Name, sdlutil.ExposeExternalPort(expose), expose.Proto)
+					if expose.IsIngress() && len(expose.Hosts) == 0 {
+						return fmt.Errorf("%w: service %q exposed on %d:%s must have a hostname",
+							errManifestRejected, service.Name, expose.GetExternalPort(), expose.Proto)
 					}
 				}
 			}

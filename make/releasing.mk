@@ -1,8 +1,7 @@
 GORELEASER_RELEASE       ?= false
 GORELEASER_DEBUG         ?= false
-GORELEASER_IMAGE         := ghcr.io/goreleaser/goreleaser-cross:v$(GOLANG_VERSION)
+GORELEASER_IMAGE         := ghcr.io/goreleaser/goreleaser-cross:$(GOTOOLCHAIN_SEMVER)
 GORELEASER_MOUNT_CONFIG  ?= false
-RELEASE_DOCKER_IMAGE     ?= ghcr.io/akash-network/provider
 
 ifeq ($(GORELEASER_RELEASE),true)
 	GORELEASER_SKIP_VALIDATE := false
@@ -17,11 +16,7 @@ ifeq ($(GORELEASER_MOUNT_CONFIG),true)
 	GORELEASER_IMAGE := -v $(HOME)/.docker/config.json:/root/.docker/config.json $(GORELEASER_IMAGE)
 endif
 
-ifeq ($(OS),Windows_NT)
-$(error Windows, really?)
-else
-	DETECTED_OS := $(shell sh -c 'uname 2>/dev/null || echo Unknown')
-endif
+DETECTED_OS := $(shell sh -c 'uname 2>/dev/null || echo Unknown')
 
 # on MacOS disable deprecation warnings security framework
 ifeq ($(DETECTED_OS), Darwin)
@@ -33,10 +28,10 @@ bins: $(BINS)
 
 .PHONY: build
 build:
-	$(GO) build -a  ./...
+	$(GO_BUILD) -a  ./...
 
-$(PROVIDER_SERVICES): modvendor
-	$(GO) build -o $@ $(BUILD_FLAGS) ./cmd/provider-services
+$(PROVIDER_SERVICES):
+	$(GO_BUILD) -o $@ $(BUILD_FLAGS) ./cmd/provider-services
 
 .PHONY: provider-services
 provider-services: $(PROVIDER_SERVICES)
@@ -49,8 +44,12 @@ docgen: $(PROVIRER_DEVCACHE)
 install:
 	$(GO) install $(BUILD_FLAGS) ./cmd/provider-services
 
+.PHONY: chmod-akash-scripts
+chmod-akash-scripts:
+	find "$(AKASHD_LOCAL_PATH)/script" -type f -name '*.sh' -exec echo "chmod +x {}" \; -exec chmod +x {} \;
+
 .PHONY: docker-image
-docker-image: modvendor
+docker-image:
 	docker run \
 		--rm \
 		-e STABLE=$(IS_STABLE) \
@@ -60,13 +59,16 @@ docker-image: modvendor
 		-e STRIP_FLAGS="$(GORELEASER_STRIP_FLAGS)" \
 		-e LINKMODE="$(GO_LINKMODE)" \
 		-e DOCKER_IMAGE=$(RELEASE_DOCKER_IMAGE) \
-		-v /var/run/docker.sock:/var/run/docker.sock $(AKASH_BIND_LOCAL) \
+		-e GOPATH=/go \
+		-e GOTOOLCHAIN="$(GOTOOLCHAIN)" \
+		-v $(GOPATH):/go:ro \
+		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(shell pwd):/go/src/$(GO_MOD_NAME) \
 		-w /go/src/$(GO_MOD_NAME) \
 		$(GORELEASER_IMAGE) \
-		-f .goreleaser-docker-$(UNAME_ARCH).yaml \
+		-f .goreleaser-docker.yaml \
 		--debug=$(GORELEASER_DEBUG) \
-		--rm-dist \
+		--clean \
 		--skip-validate \
 		--skip-publish \
 		--snapshot
@@ -77,7 +79,7 @@ gen-changelog: $(GIT_CHGLOG)
 	./script/genchangelog.sh "$(RELEASE_TAG)" .cache/changelog.md
 
 .PHONY: release
-release: modvendor gen-changelog
+release: gen-changelog
 	docker run \
 		--rm \
 		-e STABLE=$(IS_STABLE) \
@@ -89,7 +91,10 @@ release: modvendor gen-changelog
 		-e GITHUB_TOKEN="$(GITHUB_TOKEN)" \
 		-e GORELEASER_CURRENT_TAG="$(RELEASE_TAG)" \
 		-e DOCKER_IMAGE=$(RELEASE_DOCKER_IMAGE) \
+		-e GOTOOLCHAIN="$(GOTOOLCHAIN)" \
+		-e GOPATH=/go \
 		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v $(GOPATH):/go:ro \
 		-v $(shell pwd):/go/src/$(GO_MOD_NAME) \
 		-w /go/src/$(GO_MOD_NAME)\
 		$(GORELEASER_IMAGE) \
@@ -97,5 +102,5 @@ release: modvendor gen-changelog
 		$(GORELEASER_SKIP_PUBLISH) \
 		--skip-validate=$(GORELEASER_SKIP_VALIDATE) \
 		--debug=$(GORELEASER_DEBUG) \
-		--rm-dist \
+		--clean \
 		--release-notes=/go/src/$(GO_MOD_NAME)/.cache/changelog.md

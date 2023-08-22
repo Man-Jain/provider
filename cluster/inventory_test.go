@@ -5,26 +5,24 @@ import (
 	"testing"
 	"time"
 
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
-	ipoptypes "github.com/akash-network/provider/operator/ipoperator/types"
-	"github.com/akash-network/provider/operator/waiter"
-
-	"github.com/akash-network/provider/cluster/operatorclients"
-
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	manifest "github.com/akash-network/node/manifest/v2beta1"
+	manifest "github.com/akash-network/akash-api/go/manifest/v2beta2"
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
+	"github.com/akash-network/akash-api/go/node/types/unit"
+	types "github.com/akash-network/akash-api/go/node/types/v1beta3"
 	"github.com/akash-network/node/pubsub"
 	"github.com/akash-network/node/testutil"
-	"github.com/akash-network/node/types/unit"
-	types "github.com/akash-network/node/types/v1beta2"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
 
 	"github.com/akash-network/provider/cluster/mocks"
-	ctypes "github.com/akash-network/provider/cluster/types/v1beta2"
+	"github.com/akash-network/provider/cluster/operatorclients"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	"github.com/akash-network/provider/event"
+	ipoptypes "github.com/akash-network/provider/operator/ipoperator/types"
+	"github.com/akash-network/provider/operator/waiter"
 )
 
 func newInventory(nodes ...string) ctypes.Inventory {
@@ -48,6 +46,10 @@ func newInventory(nodes ...string) ctypes.Inventory {
 				allocatable: sdk.NewInt(nullClientCPU),
 				allocated:   sdk.NewInt(100),
 			},
+			gpu: resourcePair{
+				allocatable: sdk.NewInt(nullClientGPU),
+				allocated:   sdk.NewInt(1),
+			},
 			memory: resourcePair{
 				allocatable: sdk.NewInt(nullClientMemory),
 				allocated:   sdk.NewInt(1 * unit.Gi),
@@ -64,13 +66,17 @@ func newInventory(nodes ...string) ctypes.Inventory {
 	return inv
 }
 
-func TestInventory_reservationAllocateable(t *testing.T) {
-	mkrg := func(cpu uint64, memory uint64, storage uint64, endpointsCount uint, count uint32) dtypes.Resource {
+func TestInventory_reservationAllocatable(t *testing.T) {
+	mkrg := func(cpu uint64, gpu uint64, memory uint64, storage uint64, endpointsCount uint, count uint32) dtypes.ResourceUnit {
 		endpoints := make([]types.Endpoint, endpointsCount)
-		return dtypes.Resource{
-			Resources: types.ResourceUnits{
+		return dtypes.ResourceUnit{
+			Resources: types.Resources{
+				ID: 1,
 				CPU: &types.CPU{
 					Units: types.NewResourceValue(cpu),
+				},
+				GPU: &types.GPU{
+					Units: types.NewResourceValue(gpu),
 				},
 				Memory: &types.Memory{
 					Quantity: types.NewResourceValue(memory),
@@ -86,7 +92,7 @@ func TestInventory_reservationAllocateable(t *testing.T) {
 		}
 	}
 
-	mkres := func(allocated bool, res ...dtypes.Resource) *reservation {
+	mkres := func(allocated bool, res ...dtypes.ResourceUnit) *reservation {
 		return &reservation{
 			allocated: allocated,
 			resources: &dtypes.GroupSpec{Resources: res},
@@ -96,14 +102,14 @@ func TestInventory_reservationAllocateable(t *testing.T) {
 	inv := newInventory("a", "b")
 
 	reservations := []*reservation{
-		mkres(true, mkrg(750, 3*unit.Gi, 1*unit.Gi, 0, 1)),
-		mkres(true, mkrg(100, 4*unit.Gi, 1*unit.Gi, 0, 2)),
-		mkres(true, mkrg(2000, 3*unit.Gi, 1*unit.Gi, 0, 2)),
-		mkres(true, mkrg(250, 12*unit.Gi, 1*unit.Gi, 0, 2)),
-		mkres(true, mkrg(100, 1*unit.G, 1*unit.Gi, 1, 2)),
-		mkres(true, mkrg(100, 4*unit.G, 1*unit.Gi, 0, 1)),
-		mkres(true, mkrg(100, 4*unit.G, 98*unit.Gi, 0, 1)),
-		mkres(true, mkrg(250, 1*unit.G, 1*unit.Gi, 0, 1)),
+		mkres(true, mkrg(750, 0, 3*unit.Gi, 1*unit.Gi, 0, 1)),
+		mkres(true, mkrg(100, 0, 4*unit.Gi, 1*unit.Gi, 0, 2)),
+		mkres(true, mkrg(2000, 0, 3*unit.Gi, 1*unit.Gi, 0, 2)),
+		mkres(true, mkrg(250, 0, 12*unit.Gi, 1*unit.Gi, 0, 2)),
+		mkres(true, mkrg(100, 0, 1*unit.G, 1*unit.Gi, 1, 2)),
+		mkres(true, mkrg(100, 0, 4*unit.G, 1*unit.Gi, 0, 1)),
+		mkres(true, mkrg(100, 0, 4*unit.G, 98*unit.Gi, 0, 1)),
+		mkres(true, mkrg(250, 0, 1*unit.G, 1*unit.Gi, 0, 1)),
 	}
 
 	for idx, r := range reservations {
@@ -124,7 +130,7 @@ func TestInventory_ClusterDeploymentNotDeployed(t *testing.T) {
 	subscriber, err := bus.Subscribe()
 	require.NoError(t, err)
 
-	deployments := make([]ctypes.Deployment, 0)
+	deployments := make([]ctypes.IDeployment, 0)
 
 	clusterClient := &mocks.Client{}
 
@@ -164,11 +170,11 @@ func TestInventory_ClusterDeploymentDeployed(t *testing.T) {
 	subscriber, err := bus.Subscribe()
 	require.NoError(t, err)
 
-	deployments := make([]ctypes.Deployment, 1)
-	deployment := &mocks.Deployment{}
+	deployments := make([]ctypes.IDeployment, 1)
+	deployment := &mocks.IDeployment{}
 	deployment.On("LeaseID").Return(lid)
 
-	groupServices := make([]manifest.Service, 1)
+	groupServices := make(manifest.Services, 1)
 
 	serviceCount := testutil.RandRangeInt(1, 10)
 	serviceEndpoints := make([]types.Endpoint, serviceCount)
@@ -184,9 +190,13 @@ func TestInventory_ClusterDeploymentDeployed(t *testing.T) {
 
 	groupServices[0] = manifest.Service{
 		Count: 1,
-		Resources: types.ResourceUnits{
+		Resources: types.Resources{
+			ID: 1,
 			CPU: &types.CPU{
 				Units: types.NewResourceValue(1),
+			},
+			GPU: &types.GPU{
+				Units: types.NewResourceValue(0),
 			},
 			Memory: &types.Memory{
 				Quantity: types.NewResourceValue(1 * unit.Gi),
@@ -205,7 +215,7 @@ func TestInventory_ClusterDeploymentDeployed(t *testing.T) {
 		Services: groupServices,
 	}
 
-	deployment.On("ManifestGroup").Return(group)
+	deployment.On("ManifestGroup").Return(&group)
 	deployments[0] = deployment
 
 	clusterClient := &mocks.Client{}
@@ -319,9 +329,13 @@ func makeInventoryScaffold(t *testing.T, leaseQty uint, inventoryCall bool, node
 		}
 	}
 
-	deploymentRequirements := types.ResourceUnits{
+	deploymentRequirements := types.Resources{
+		ID: 1,
 		CPU: &types.CPU{
 			Units: types.NewResourceValue(4000),
+		},
+		GPU: &types.GPU{
+			Units: types.NewResourceValue(0),
 		},
 		Memory: &types.Memory{
 			Quantity: types.NewResourceValue(30 * unit.Gi),
@@ -386,9 +400,13 @@ func makeGroupForInventoryTest(sharedHTTP, nodePort, leasedIP bool) manifest.Gro
 		serviceEndpoints = append(serviceEndpoints, serviceEndpoint)
 	}
 
-	deploymentRequirements := types.ResourceUnits{
+	deploymentRequirements := types.Resources{
+		ID: 1,
 		CPU: &types.CPU{
 			Units: types.NewResourceValue(4000),
+		},
+		GPU: &types.GPU{
+			Units: types.NewResourceValue(0),
 		},
 		Memory: &types.Memory{
 			Quantity: types.NewResourceValue(30 * unit.Gi),
@@ -435,7 +453,7 @@ func TestInventory_ReserveIPNoIPOperator(t *testing.T) {
 		scaffold.clusterClient,
 		nil,                    // No IP operator client
 		waiter.NewNullWaiter(), // Do not need to wait in test
-		make([]ctypes.Deployment, 0))
+		make([]ctypes.IDeployment, 0))
 	require.NoError(t, err)
 	require.NotNil(t, inv)
 
@@ -480,7 +498,7 @@ func TestInventory_ReserveIPUnavailableWithIPOperator(t *testing.T) {
 		scaffold.clusterClient,
 		mockIP,
 		waiter.NewNullWaiter(), // Do not need to wait in test
-		make([]ctypes.Deployment, 0))
+		make([]ctypes.IDeployment, 0))
 	require.NoError(t, err)
 	require.NotNil(t, inv)
 
@@ -543,7 +561,7 @@ func TestInventory_ReserveIPAvailableWithIPOperator(t *testing.T) {
 		scaffold.clusterClient,
 		mockIP,
 		waiter.NewNullWaiter(), // Do not need to wait in test
-		make([]ctypes.Deployment, 0))
+		make([]ctypes.IDeployment, 0))
 	require.NoError(t, err)
 	require.NotNil(t, inv)
 
@@ -605,9 +623,12 @@ func TestInventory_OverReservations(t *testing.T) {
 		}
 	}
 
-	deploymentRequirements := types.ResourceUnits{
+	deploymentRequirements := types.Resources{
 		CPU: &types.CPU{
 			Units: types.NewResourceValue(4000),
+		},
+		GPU: &types.GPU{
+			Units: types.NewResourceValue(0),
 		},
 		Memory: &types.Memory{
 			Quantity: types.NewResourceValue(30 * unit.Gi),
@@ -644,7 +665,7 @@ func TestInventory_OverReservations(t *testing.T) {
 		scaffold.clusterClient,
 		nil,                    // No IP operator client
 		waiter.NewNullWaiter(), // Do not need to wait in test
-		make([]ctypes.Deployment, 0))
+		make([]ctypes.IDeployment, 0))
 	require.NoError(t, err)
 	require.NotNil(t, inv)
 

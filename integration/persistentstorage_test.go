@@ -11,14 +11,15 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/cosmos/cosmos-sdk/client/flags"
-	uuid "github.com/satori/go.uuid"
+	"github.com/google/uuid"
 
+	"github.com/cosmos/cosmos-sdk/client/flags"
+
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
 	clitestutil "github.com/akash-network/node/testutil/cli"
 	deploycli "github.com/akash-network/node/x/deployment/client/cli"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
 	mcli "github.com/akash-network/node/x/market/client/cli"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 
 	ptestutil "github.com/akash-network/provider/testutil/provider"
 )
@@ -49,8 +50,7 @@ func (s *E2EPersistentStorageDefault) TestDefaultStorageClass() {
 		s.validator.ClientCtx,
 		s.keyTenant.GetAddress(),
 		deploymentPath,
-		cliGlobalFlags(fmt.Sprintf("--deposit=%s", dtypes.DefaultDeploymentMinDeposit),
-			fmt.Sprintf("--dseq=%v", deploymentID.DSeq))...,
+		cliGlobalFlags(deploymentUAktDeposit, fmt.Sprintf("--dseq=%v", deploymentID.DSeq))...,
 	)
 	s.Require().NoError(err)
 	s.Require().NoError(s.waitForBlocksCommitted(7))
@@ -99,7 +99,7 @@ func (s *E2EPersistentStorageDefault) TestDefaultStorageClass() {
 	s.Require().NoError(err)
 	s.Require().Equal(`default`, string(bodyData))
 
-	testData := uuid.NewV4()
+	testData := uuid.New()
 
 	// Hit the endpoint to read a key in redis, foo
 	appURL = fmt.Sprintf("http://%s:%s/SET/value", s.appHost, s.appPort)
@@ -151,8 +151,7 @@ func (s *E2EPersistentStorageBeta2) TestDedicatedStorageClass() {
 		s.validator.ClientCtx,
 		s.keyTenant.GetAddress(),
 		deploymentPath,
-		cliGlobalFlags(fmt.Sprintf("--deposit=%s", dtypes.DefaultDeploymentMinDeposit),
-			fmt.Sprintf("--dseq=%v", deploymentID.DSeq))...,
+		cliGlobalFlags(deploymentUAktDeposit, fmt.Sprintf("--dseq=%v", deploymentID.DSeq))...,
 	)
 	s.Require().NoError(err)
 	s.Require().NoError(s.waitForBlocksCommitted(7))
@@ -200,7 +199,7 @@ func (s *E2EPersistentStorageBeta2) TestDedicatedStorageClass() {
 	bodyData, err := io.ReadAll(httpResp.Body)
 	s.Require().NoError(err)
 	s.Require().Equal(`default`, string(bodyData))
-	testData := uuid.NewV4()
+	testData := uuid.New()
 
 	// Hit the endpoint to read a key in redis, foo
 	appURL = fmt.Sprintf("http://%s:%s/SET/value", s.appHost, s.appPort)

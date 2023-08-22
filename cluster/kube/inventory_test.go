@@ -12,23 +12,24 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
+	"github.com/akash-network/akash-api/go/node/types/unit"
+	atypes "github.com/akash-network/akash-api/go/node/types/v1beta3"
 	"github.com/akash-network/node/testutil"
-	"github.com/akash-network/node/types/unit"
-	atypes "github.com/akash-network/node/types/v1beta2"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 
+	"github.com/akash-network/provider/cluster/kube/builder"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
+	akashclientfake "github.com/akash-network/provider/pkg/client/clientset/versioned/fake"
 	kubernetesmocks "github.com/akash-network/provider/testutil/kubernetes_mock"
 	corev1mocks "github.com/akash-network/provider/testutil/kubernetes_mock/typed/core/v1"
 	storagev1mocks "github.com/akash-network/provider/testutil/kubernetes_mock/typed/storage/v1"
-
-	akashclientfake "github.com/akash-network/provider/pkg/client/clientset/versioned/fake"
-
-	ctypes "github.com/akash-network/provider/cluster/types/v1beta2"
 )
 
 type testReservation struct {
-	resources dtypes.GroupSpec
+	resources         dtypes.GroupSpec
+	adjustedResources dtypes.ResourceUnits
 }
 
 var _ ctypes.Reservation = (*testReservation)(nil)
@@ -37,13 +38,20 @@ func (r *testReservation) OrderID() mtypes.OrderID {
 	return mtypes.OrderID{}
 }
 
-func (r *testReservation) Resources() atypes.ResourceGroup {
+func (r *testReservation) Resources() dtypes.ResourceGroup {
 	return r.resources
+}
+
+func (r *testReservation) SetAllocatedResources(val dtypes.ResourceUnits) {
+	r.adjustedResources = val
 }
 
 func (r *testReservation) Allocated() bool {
 	return false
 }
+
+func (r *testReservation) SetClusterParams(_ interface{}) {}
+func (r *testReservation) ClusterParams() interface{}     { return nil }
 
 type inventoryScaffold struct {
 	kmock                   *kubernetesmocks.Interface
@@ -352,7 +360,7 @@ func TestInventoryMultipleReplicasFulFilled1(t *testing.T) {
 	require.NotNil(t, inv)
 	require.Len(t, inv.Metrics().Nodes, 4)
 
-	err = inv.Adjust(multipleReplicasGenReservations(100000, 2))
+	err = inv.Adjust(multipleReplicasGenReservations(100000, 0, 2))
 	require.NoError(t, err)
 }
 
@@ -374,7 +382,7 @@ func TestInventoryMultipleReplicasFulFilled2(t *testing.T) {
 	require.NotNil(t, inv)
 	require.Len(t, inv.Metrics().Nodes, 4)
 
-	err = inv.Adjust(multipleReplicasGenReservations(68780, 4))
+	err = inv.Adjust(multipleReplicasGenReservations(68780, 0, 4))
 	require.NoError(t, err)
 }
 
@@ -396,7 +404,7 @@ func TestInventoryMultipleReplicasFulFilled3(t *testing.T) {
 	require.NotNil(t, inv)
 	require.Len(t, inv.Metrics().Nodes, 4)
 
-	err = inv.Adjust(multipleReplicasGenReservations(68800, 3))
+	err = inv.Adjust(multipleReplicasGenReservations(68800, 0, 3))
 	require.NoError(t, err)
 }
 
@@ -418,7 +426,7 @@ func TestInventoryMultipleReplicasFulFilled4(t *testing.T) {
 	require.NotNil(t, inv)
 	require.Len(t, inv.Metrics().Nodes, 4)
 
-	err = inv.Adjust(multipleReplicasGenReservations(119495, 2))
+	err = inv.Adjust(multipleReplicasGenReservations(119495, 0, 2))
 	require.NoError(t, err)
 }
 
@@ -440,7 +448,51 @@ func TestInventoryMultipleReplicasFulFilled5(t *testing.T) {
 	require.NotNil(t, inv)
 	require.Len(t, inv.Metrics().Nodes, 4)
 
-	err = inv.Adjust(multipleReplicasGenReservations(68780, 1))
+	err = inv.Adjust(multipleReplicasGenReservations(68780, 0, 1))
+	require.NoError(t, err)
+}
+
+func TestInventoryMultipleReplicasFulFilled6(t *testing.T) {
+	s := makeInventoryScaffold()
+
+	nodeList := &v1.NodeList{
+		Items: multipleReplicasGenNodes(),
+	}
+
+	podList := &v1.PodList{Items: []v1.Pod{}}
+
+	s.nodeInterfaceMock.On("List", mock.Anything, mock.Anything).Return(nodeList, nil)
+	s.podInterfaceMock.On("List", mock.Anything, mock.Anything).Return(podList, nil)
+
+	clientInterface := clientForTest(t, s.kmock, s.amock)
+	inv, err := clientInterface.Inventory(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, inv)
+	require.Len(t, inv.Metrics().Nodes, 4)
+
+	err = inv.Adjust(multipleReplicasGenReservations(68780, 1, 1))
+	require.NoError(t, err)
+}
+
+func TestInventoryMultipleReplicasFulFilled7(t *testing.T) {
+	s := makeInventoryScaffold()
+
+	nodeList := &v1.NodeList{
+		Items: multipleReplicasGenNodes(),
+	}
+
+	podList := &v1.PodList{Items: []v1.Pod{}}
+
+	s.nodeInterfaceMock.On("List", mock.Anything, mock.Anything).Return(nodeList, nil)
+	s.podInterfaceMock.On("List", mock.Anything, mock.Anything).Return(podList, nil)
+
+	clientInterface := clientForTest(t, s.kmock, s.amock)
+	inv, err := clientInterface.Inventory(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, inv)
+	require.Len(t, inv.Metrics().Nodes, 4)
+
+	err = inv.Adjust(multipleSvcReplicasGenReservations(68700, 1, 1))
 	require.NoError(t, err)
 }
 
@@ -462,7 +514,7 @@ func TestInventoryMultipleReplicasOutOfCapacity1(t *testing.T) {
 	require.NotNil(t, inv)
 	require.Len(t, inv.Metrics().Nodes, 4)
 
-	err = inv.Adjust(multipleReplicasGenReservations(70000, 4))
+	err = inv.Adjust(multipleReplicasGenReservations(70000, 0, 4))
 	require.Error(t, err)
 	require.EqualError(t, ctypes.ErrInsufficientCapacity, err.Error())
 }
@@ -485,7 +537,7 @@ func TestInventoryMultipleReplicasOutOfCapacity2(t *testing.T) {
 	require.NotNil(t, inv)
 	require.Len(t, inv.Metrics().Nodes, 4)
 
-	err = inv.Adjust(multipleReplicasGenReservations(100000, 3))
+	err = inv.Adjust(multipleReplicasGenReservations(100000, 0, 3))
 	require.Error(t, err)
 	require.EqualError(t, ctypes.ErrInsufficientCapacity, err.Error())
 }
@@ -508,9 +560,35 @@ func TestInventoryMultipleReplicasOutOfCapacity4(t *testing.T) {
 	require.NotNil(t, inv)
 	require.Len(t, inv.Metrics().Nodes, 4)
 
-	err = inv.Adjust(multipleReplicasGenReservations(119525, 2))
+	err = inv.Adjust(multipleReplicasGenReservations(119525, 0, 2))
 	require.Error(t, err)
 	require.EqualError(t, ctypes.ErrInsufficientCapacity, err.Error())
+}
+
+func TestParseCapabilities(t *testing.T) {
+	type testCase struct {
+		labels          map[string]string
+		expCapabilities *crd.NodeInfoCapabilities
+	}
+
+	tests := []testCase{
+		{
+			labels: map[string]string{
+				"akash.network/capabilities.gpu.vendor.nvidia.model.a100": "true",
+			},
+			expCapabilities: &crd.NodeInfoCapabilities{
+				GPU: crd.GPUCapabilities{
+					Vendor: "nvidia",
+					Model:  "a100",
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		caps := parseNodeCapabilities(test.labels, nil)
+		require.Equal(t, test.expCapabilities, caps)
+	}
 }
 
 // multipleReplicasGenNodes generates four nodes with following CPUs available
@@ -552,11 +630,15 @@ func multipleReplicasGenNodes() []v1.Node {
 			TypeMeta: metav1.TypeMeta{},
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "node2",
+				Labels: map[string]string{
+					"akash.network/capabilities.gpu.vendor.nvidia.model.a100": "true",
+				},
 			},
 			Spec: v1.NodeSpec{},
 			Status: v1.NodeStatus{
 				Allocatable: v1.ResourceList{
 					v1.ResourceCPU:              *(resource.NewMilliQuantity(68800, resource.DecimalSI)),
+					builder.ResourceGPUNvidia:   *(resource.NewQuantity(2, resource.DecimalSI)),
 					v1.ResourceMemory:           *(resource.NewQuantity(457328218112, resource.DecimalSI)),
 					v1.ResourceEphemeralStorage: *(resource.NewQuantity(7752161163113, resource.DecimalSI)),
 				},
@@ -599,16 +681,89 @@ func multipleReplicasGenNodes() []v1.Node {
 	}
 }
 
-func multipleReplicasGenReservations(cpuUnits uint64, count uint32) *testReservation {
+func multipleReplicasGenReservations(cpuUnits, gpuUnits uint64, count uint32) *testReservation {
+	var gpuAttributes atypes.Attributes
+	if gpuUnits > 0 {
+		gpuAttributes = append(gpuAttributes, atypes.Attribute{
+			Key:   "vendor/nvidia/model/a100",
+			Value: "true",
+		})
+	}
 	return &testReservation{
 		resources: dtypes.GroupSpec{
 			Name:         "bla",
 			Requirements: atypes.PlacementRequirements{},
-			Resources: []dtypes.Resource{
+			Resources: dtypes.ResourceUnits{
 				{
-					Resources: atypes.ResourceUnits{
+					Resources: atypes.Resources{
+						ID: 1,
 						CPU: &atypes.CPU{
 							Units: atypes.NewResourceValue(cpuUnits),
+						},
+						GPU: &atypes.GPU{
+							Units:      atypes.NewResourceValue(gpuUnits),
+							Attributes: gpuAttributes,
+						},
+						Memory: &atypes.Memory{
+							Quantity: atypes.NewResourceValue(16 * unit.Gi),
+						},
+						Storage: []atypes.Storage{
+							{
+								Name:     "default",
+								Quantity: atypes.NewResourceValue(8 * unit.Gi),
+							},
+						},
+					},
+					Count: count,
+				},
+			},
+		},
+	}
+}
+
+func multipleSvcReplicasGenReservations(cpuUnits, gpuUnits uint64, count uint32) *testReservation {
+	var gpuAttributes atypes.Attributes
+	if gpuUnits > 0 {
+		gpuAttributes = append(gpuAttributes, atypes.Attribute{
+			Key:   "vendor/nvidia/model/a100",
+			Value: "true",
+		})
+	}
+	return &testReservation{
+		resources: dtypes.GroupSpec{
+			Name:         "bla",
+			Requirements: atypes.PlacementRequirements{},
+			Resources: dtypes.ResourceUnits{
+				{
+					Resources: atypes.Resources{
+						ID: 1,
+						CPU: &atypes.CPU{
+							Units: atypes.NewResourceValue(cpuUnits),
+						},
+						GPU: &atypes.GPU{
+							Units: atypes.NewResourceValue(0),
+						},
+						Memory: &atypes.Memory{
+							Quantity: atypes.NewResourceValue(16 * unit.Gi),
+						},
+						Storage: []atypes.Storage{
+							{
+								Name:     "default",
+								Quantity: atypes.NewResourceValue(8 * unit.Gi),
+							},
+						},
+					},
+					Count: count,
+				},
+				{
+					Resources: atypes.Resources{
+						ID: 2,
+						CPU: &atypes.CPU{
+							Units: atypes.NewResourceValue(cpuUnits),
+						},
+						GPU: &atypes.GPU{
+							Units:      atypes.NewResourceValue(gpuUnits),
+							Attributes: gpuAttributes,
 						},
 						Memory: &atypes.Memory{
 							Quantity: atypes.NewResourceValue(16 * unit.Gi),

@@ -4,14 +4,11 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
-	"github.com/tendermint/tendermint/libs/log"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	manitypes "github.com/akash-network/node/manifest/v2beta1"
-	sdlutil "github.com/akash-network/node/sdl/util"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
+	manitypes "github.com/akash-network/akash-api/go/manifest/v2beta2"
 )
 
 type Service interface {
@@ -22,21 +19,25 @@ type Service interface {
 }
 
 type service struct {
-	workload
+	Workload
 	requireNodePort bool
 }
 
 var _ Service = (*service)(nil)
 
-func BuildService(log log.Logger, settings Settings, lid mtypes.LeaseID, group *manitypes.Group, mservice *manitypes.Service, requireNodePort bool) Service {
-	return &service{
-		workload:        newWorkloadBuilder(log, settings, lid, group, mservice),
+func BuildService(workload Workload, requireNodePort bool) Service {
+	ss := &service{
+		Workload:        workload,
 		requireNodePort: requireNodePort,
 	}
+
+	ss.Workload.log = ss.Workload.log.With("object", "service", "service-name", ss.deployment.ManifestGroup().Services[ss.serviceIdx].Name)
+
+	return ss
 }
 
 func (b *service) Name() string {
-	basename := b.workload.Name()
+	basename := b.Workload.Name()
 	if b.requireNodePort {
 		return makeGlobalServiceNameFromBasename(basename)
 	}
@@ -66,7 +67,6 @@ func (b *service) Create() (*corev1.Service, error) { // nolint:golint,unparam
 			Ports:    ports,
 		},
 	}
-	// b.log.Debug("provider/cluster/kube/builder: created service", "service", svc)
 
 	return svc, nil
 }
@@ -105,13 +105,14 @@ func (b *service) Update(obj *corev1.Service) (*corev1.Service, error) { // noli
 }
 
 func (b *service) Any() bool {
-	for _, expose := range b.service.Expose {
-		exposeIsIngress := sdlutil.ShouldBeIngress(expose)
-		if b.requireNodePort && exposeIsIngress {
+	service := &b.deployment.ManifestGroup().Services[b.serviceIdx]
+
+	for _, expose := range service.Expose {
+		if b.requireNodePort && expose.IsIngress() {
 			continue
 		}
 
-		if !b.requireNodePort && exposeIsIngress {
+		if !b.requireNodePort && expose.IsIngress() {
 			return true
 		}
 
@@ -126,12 +127,13 @@ var errUnsupportedProtocol = errors.New("Unsupported protocol for service")
 var errInvalidServiceBuilder = errors.New("service builder invalid")
 
 func (b *service) ports() ([]corev1.ServicePort, error) {
-	ports := make([]corev1.ServicePort, 0, len(b.service.Expose))
+	service := &b.deployment.ManifestGroup().Services[b.serviceIdx]
+
+	ports := make([]corev1.ServicePort, 0, len(service.Expose))
 	portsAdded := make(map[int32]struct{})
-	for i, expose := range b.service.Expose {
-		shouldBeIngress := sdlutil.ShouldBeIngress(expose)
-		if expose.Global == b.requireNodePort || (!b.requireNodePort && shouldBeIngress) {
-			if b.requireNodePort && shouldBeIngress {
+	for i, expose := range service.Expose {
+		if expose.Global == b.requireNodePort || (!b.requireNodePort && expose.IsIngress()) {
+			if b.requireNodePort && expose.IsIngress() {
 				continue
 			}
 
@@ -144,7 +146,7 @@ func (b *service) ports() ([]corev1.ServicePort, error) {
 			default:
 				return nil, errUnsupportedProtocol
 			}
-			externalPort := sdlutil.ExposeExternalPort(b.service.Expose[i])
+			externalPort := expose.GetExternalPort()
 			_, added := portsAdded[externalPort]
 			if !added {
 				portsAdded[externalPort] = struct{}{}
@@ -159,7 +161,7 @@ func (b *service) ports() ([]corev1.ServicePort, error) {
 	}
 
 	if len(ports) == 0 {
-		b.log.Debug("provider/cluster/kube/builder: created 0 ports", "requireNodePort", b.requireNodePort, "serviceExpose", b.service.Expose)
+		b.log.Debug("provider/cluster/kube/builder: created 0 ports", "requireNodePort", b.requireNodePort, "serviceExpose", service.Expose)
 		return nil, errInvalidServiceBuilder
 	}
 

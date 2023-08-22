@@ -27,7 +27,9 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/tendermint/tendermint/libs/log"
 
-	manifest "github.com/akash-network/node/manifest/v2beta1"
+	manifest "github.com/akash-network/akash-api/go/manifest/v2beta2"
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	mtypes "github.com/akash-network/akash-api/go/node/market/v1beta3"
 	"github.com/akash-network/node/util/wsutil"
 	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
 	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
@@ -37,7 +39,7 @@ import (
 	"github.com/akash-network/provider/cluster/kube/builder"
 	kubeclienterrors "github.com/akash-network/provider/cluster/kube/errors"
 	"github.com/akash-network/provider/cluster/operatorclients"
-	cltypes "github.com/akash-network/provider/cluster/types/v1beta2"
+	cltypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	"github.com/akash-network/provider/cluster/util"
 	"github.com/akash-network/provider/gateway/utils"
 	pmanifest "github.com/akash-network/provider/manifest"
@@ -106,9 +108,18 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client, ipopcl
 		createStatusHandler(log, pclient, addr)).
 		Methods("GET")
 
+	vrouter := router.NewRoute().Subrouter()
+	vrouter.Use(requireOwner())
+
 	// GET /validate
 	// validate endpoint checks if provider will bid on given groupspec
-	router.HandleFunc("/validate",
+	vrouter.HandleFunc("/validate",
+		validateHandler(log, pclient)).
+		Methods("GET")
+
+	// GET /wiboy (aka would I bid on you)
+	// validate endpoint checks if provider will bid on given groupspec
+	vrouter.HandleFunc("/wiboy",
 		validateHandler(log, pclient)).
 		Methods("GET")
 
@@ -527,6 +538,8 @@ func validateHandler(log log.Logger, cl provider.ValidateClient) http.HandlerFun
 			return
 		}
 
+		owner := requestOwner(req)
+
 		var gspec dtypes.GroupSpec
 
 		if err := json.Unmarshal(data, &gspec); err != nil {
@@ -534,7 +547,7 @@ func validateHandler(log log.Logger, cl provider.ValidateClient) http.HandlerFun
 			return
 		}
 
-		validate, err := cl.Validate(req.Context(), gspec)
+		validate, err := cl.Validate(req.Context(), owner, gspec)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

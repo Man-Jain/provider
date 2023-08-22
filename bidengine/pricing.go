@@ -1,34 +1,36 @@
 package bidengine
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/json"
-	"fmt"
 	"math/big"
-	"os"
-	"os/exec"
-	"time"
 
 	"github.com/pkg/errors"
 	"github.com/shopspring/decimal"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
+	dtypes "github.com/akash-network/akash-api/go/node/deployment/v1beta3"
+	"github.com/akash-network/akash-api/go/node/types/unit"
+	atypes "github.com/akash-network/akash-api/go/node/types/v1beta3"
 	"github.com/akash-network/node/sdl"
-	"github.com/akash-network/node/types/unit"
-	atypes "github.com/akash-network/node/types/v1beta2"
-	dtypes "github.com/akash-network/node/x/deployment/types/v1beta2"
 
 	"github.com/akash-network/provider/cluster/util"
 )
 
-type BidPricingStrategy interface {
-	CalculatePrice(ctx context.Context, owner string, gspec *dtypes.GroupSpec) (sdk.DecCoin, error)
+type Request struct {
+	Owner          string `json:"owner"`
+	GSpec          *dtypes.GroupSpec
+	PricePrecision int
 }
 
-const denom = "uakt"
+const (
+	DefaultPricePrecision = 6
+)
+
+type BidPricingStrategy interface {
+	CalculatePrice(ctx context.Context, req Request) (sdk.DecCoin, error)
+}
 
 var (
 	errAllScalesZero               = errors.New("at least one bid price must be a non-zero number")
@@ -109,8 +111,10 @@ func MakeScalePricing(
 	return result, nil
 }
 
-var ErrBidQuantityInvalid = errors.New("A bid quantity is invalid")
-var ErrBidZero = errors.New("A bid of zero was produced")
+var (
+	ErrBidQuantityInvalid = errors.New("A bid quantity is invalid")
+	ErrBidZero            = errors.New("A bid of zero was produced")
+)
 
 func ceilBigRatToBigInt(v *big.Rat) *big.Int {
 	numerator := v.Num()
@@ -124,13 +128,14 @@ func ceilBigRatToBigInt(v *big.Rat) *big.Int {
 	return result
 }
 
-func (fp scalePricing) CalculatePrice(_ context.Context, _ string, gspec *dtypes.GroupSpec) (sdk.DecCoin, error) {
+func (fp scalePricing) CalculatePrice(_ context.Context, req Request) (sdk.DecCoin, error) {
 	// Use unlimited precision math here.
-	// Otherwise a correctly crafted order could create a cost of '1' given
+	// Otherwise, a correctly crafted order could create a cost of '1' given
 	// a possible configuration
 	cpuTotal := decimal.NewFromInt(0)
 	memoryTotal := decimal.NewFromInt(0)
 	storageTotal := make(Storage)
+	denom := req.GSpec.Price().Denom
 
 	for k := range fp.storageScale {
 		storageTotal[k] = decimal.NewFromInt(0)
@@ -138,10 +143,10 @@ func (fp scalePricing) CalculatePrice(_ context.Context, _ string, gspec *dtypes
 
 	endpointTotal := decimal.NewFromInt(0)
 	ipTotal := decimal.NewFromInt(0).Add(fp.ipScale)
-	ipTotal = ipTotal.Mul(decimal.NewFromInt(int64(util.GetEndpointQuantityOfResourceGroup(gspec, atypes.Endpoint_LEASED_IP))))
+	ipTotal = ipTotal.Mul(decimal.NewFromInt(int64(util.GetEndpointQuantityOfResourceGroup(req.GSpec, atypes.Endpoint_LEASED_IP))))
 
 	// iterate over everything & sum it up
-	for _, group := range gspec.Resources {
+	for _, group := range req.GSpec.Resources {
 		groupCount := decimal.NewFromInt(int64(group.Count)) // Expand uint32 to int64
 
 		cpuQuantity := decimal.NewFromBigInt(group.Resources.CPU.Units.Val.BigInt(), 0)
@@ -198,7 +203,7 @@ func (fp scalePricing) CalculatePrice(_ context.Context, _ string, gspec *dtypes
 
 	endpointTotal = endpointTotal.Mul(fp.endpointScale)
 
-	// Each quantity must be non negative
+	// Each quantity must be non-negative
 	// and fit into an Int64
 	if cpuTotal.IsNegative() ||
 		memoryTotal.IsNegative() ||
@@ -243,8 +248,8 @@ func MakeRandomRangePricing() (BidPricingStrategy, error) {
 	return randomRangePricing(0), nil
 }
 
-func (randomRangePricing) CalculatePrice(_ context.Context, _ string, gspec *dtypes.GroupSpec) (sdk.DecCoin, error) {
-	min, max := calculatePriceRange(gspec)
+func (randomRangePricing) CalculatePrice(_ context.Context, req Request) (sdk.DecCoin, error) {
+	min, max := calculatePriceRange(req.GSpec)
 	if min.IsEqual(max) {
 		return max, nil
 	}
@@ -312,158 +317,41 @@ func calculatePriceRange(gspec *dtypes.GroupSpec) (sdk.DecCoin, sdk.DecCoin) {
 	return sdk.NewDecCoinFromDec(rmax.Denom, cmin), sdk.NewDecCoinFromDec(rmax.Denom, cmax)
 }
 
-type shellScriptPricing struct {
-	path         string
-	processLimit chan int
-	runtimeLimit time.Duration
-}
-
 var errPathEmpty = errors.New("script path cannot be the empty string")
 var errProcessLimitZero = errors.New("process limit must be greater than zero")
 var errProcessRuntimeLimitZero = errors.New("process runtime limit must be greater than zero")
-
-func MakeShellScriptPricing(path string, processLimit uint, runtimeLimit time.Duration) (BidPricingStrategy, error) {
-	if len(path) == 0 {
-		return nil, errPathEmpty
-	}
-	if processLimit == 0 {
-		return nil, errProcessLimitZero
-	}
-	if runtimeLimit == 0 {
-		return nil, errProcessRuntimeLimitZero
-	}
-
-	result := shellScriptPricing{
-		path:         path,
-		processLimit: make(chan int, processLimit),
-		runtimeLimit: runtimeLimit,
-	}
-
-	// Use the channel as a semaphore to limit the number of processes created for computing bid processes
-	// Most platforms put a limit on the number of processes a user can open. Even if the limit is high
-	// it isn't a good idea to open thousands of processes.
-	for i := uint(0); i != processLimit; i++ {
-		result.processLimit <- 0
-	}
-
-	return result, nil
-}
 
 type storageElement struct {
 	Class string `json:"class"`
 	Size  uint64 `json:"size"`
 }
 
+type gpuVendorAttributes struct {
+	Model string  `json:"model"`
+	RAM   *string `json:"ram,omitempty"`
+}
+
+type gpuAttributes struct {
+	Vendor map[string]gpuVendorAttributes `json:"vendor,omitempty"`
+}
+
+type gpuElement struct {
+	Units      uint64        `json:"units"`
+	Attributes gpuAttributes `json:"attributes"`
+}
+
 type dataForScriptElement struct {
 	Memory           uint64           `json:"memory"`
 	CPU              uint64           `json:"cpu"`
+	GPU              gpuElement       `json:"gpu"`
 	Storage          []storageElement `json:"storage"`
 	Count            uint32           `json:"count"`
 	EndpointQuantity int              `json:"endpoint_quantity"`
 	IPLeaseQuantity  uint             `json:"ip_lease_quantity"`
 }
 
-func (ssp shellScriptPricing) CalculatePrice(ctx context.Context, owner string, gspec *dtypes.GroupSpec) (sdk.DecCoin, error) {
-
-	buf := &bytes.Buffer{}
-
-	dataForScript := make([]dataForScriptElement, len(gspec.Resources))
-
-	// iterate over everything & sum it up
-	for i, group := range gspec.Resources {
-		groupCount := group.Count
-		cpuQuantity := group.Resources.CPU.Units.Val.Uint64()
-		memoryQuantity := group.Resources.Memory.Quantity.Value()
-		storageQuantity := make([]storageElement, 0, len(group.Resources.Storage))
-
-		for _, storage := range group.Resources.Storage {
-			class := sdl.StorageEphemeral
-			if attr := storage.Attributes; attr != nil {
-				if cl, _ := attr.Find(sdl.StorageAttributeClass).AsString(); cl != "" {
-					class = cl
-				}
-			}
-
-			storageQuantity = append(storageQuantity, storageElement{
-				Class: class,
-				Size:  storage.Quantity.Val.Uint64(),
-			})
-		}
-
-		endpointQuantity := len(group.Resources.Endpoints)
-
-		dataForScript[i] = dataForScriptElement{
-			CPU:              cpuQuantity,
-			Memory:           memoryQuantity,
-			Storage:          storageQuantity,
-			Count:            groupCount,
-			EndpointQuantity: endpointQuantity,
-			IPLeaseQuantity:  util.GetEndpointQuantityOfResourceUnits(group.Resources, atypes.Endpoint_LEASED_IP),
-		}
-	}
-
-	encoder := json.NewEncoder(buf)
-	err := encoder.Encode(dataForScript)
-	if err != nil {
-		return sdk.DecCoin{}, err
-	}
-
-	// Take 1 from the channel
-	<-ssp.processLimit
-	defer func() {
-		// Always return it when this function is complete
-		ssp.processLimit <- 0
-	}()
-
-	processCtx, cancel := context.WithTimeout(ctx, ssp.runtimeLimit)
-	defer cancel()
-	cmd := exec.CommandContext(processCtx, ssp.path) //nolint:gosec
-	cmd.Stdin = buf
-	outputBuf := &bytes.Buffer{}
-	cmd.Stdout = outputBuf
-	stderrBuf := &bytes.Buffer{}
-	cmd.Stderr = stderrBuf
-
-	subprocEnv := os.Environ()
-	subprocEnv = append(subprocEnv, fmt.Sprintf("AKASH_OWNER=%s", owner))
-	cmd.Env = subprocEnv
-
-	err = cmd.Run()
-
-	if ctxErr := processCtx.Err(); ctxErr != nil {
-		return sdk.DecCoin{}, ctxErr
-	}
-
-	if err != nil {
-		return sdk.DecCoin{}, fmt.Errorf("%w: script failure %s", err, stderrBuf.String())
-	}
-
-	// Decode the result
-	decoder := json.NewDecoder(outputBuf)
-	decoder.UseNumber()
-
-	var priceNumber json.Number
-	err = decoder.Decode(&priceNumber)
-	if err != nil {
-		return sdk.DecCoin{}, fmt.Errorf("%w: script failure %s", err, stderrBuf.String())
-	}
-
-	price, err := sdk.NewDecFromStr(priceNumber.String())
-	if err != nil {
-		return sdk.DecCoin{}, ErrBidQuantityInvalid
-	}
-
-	if price.IsZero() {
-		return sdk.DecCoin{}, ErrBidZero
-	}
-
-	if price.IsNegative() {
-		return sdk.DecCoin{}, ErrBidQuantityInvalid
-	}
-
-	if !price.LTE(sdk.MaxSortableDec) {
-		return sdk.DecCoin{}, ErrBidQuantityInvalid
-	}
-
-	return sdk.NewDecCoinFromDec(denom, price), nil
+type dataForScript struct {
+	Resources      []dataForScriptElement `json:"resources"`
+	Price          sdk.DecCoin            `json:"price"`
+	PricePrecision *int                   `json:"price_precision,omitempty"`
 }

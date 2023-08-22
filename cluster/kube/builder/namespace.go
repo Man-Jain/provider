@@ -3,9 +3,6 @@ package builder
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	manitypes "github.com/akash-network/node/manifest/v2beta1"
-	mtypes "github.com/akash-network/node/x/market/types/v1beta2"
 )
 
 type NS interface {
@@ -20,12 +17,12 @@ type ns struct {
 
 var _ NS = (*ns)(nil)
 
-func BuildNS(settings Settings, lid mtypes.LeaseID, group *manitypes.Group) NS {
-	return &ns{builder: builder{settings: settings, lid: lid, group: group}}
+func BuildNS(settings Settings, deployment IClusterDeployment) NS {
+	return &ns{builder: builder{settings: settings, deployment: deployment}}
 }
 
 func (b *ns) labels() map[string]string {
-	return AppendLeaseLabels(b.lid, b.builder.labels())
+	return AppendLeaseLabels(b.deployment.LeaseID(), b.builder.labels())
 }
 
 func (b *ns) Create() (*corev1.Namespace, error) { // nolint:golint,unparam

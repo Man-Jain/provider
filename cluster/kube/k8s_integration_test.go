@@ -20,8 +20,10 @@ import (
 
 	"github.com/akash-network/provider/cluster/kube/builder"
 	"github.com/akash-network/provider/cluster/kube/clientcommon"
+	ctypes "github.com/akash-network/provider/cluster/types/v1beta3"
 	providerflags "github.com/akash-network/provider/cmd/provider-services/cmd/flags"
-	mtestutil "github.com/akash-network/provider/testutil/manifest"
+	crd "github.com/akash-network/provider/pkg/apis/akash.network/v2beta2"
+	mtestutil "github.com/akash-network/provider/testutil/manifest/v2beta2"
 )
 
 func TestNewClientNSNotFound(t *testing.T) {
@@ -47,6 +49,7 @@ func TestNewClient(t *testing.T) {
 	// create lease
 	lid := atestutil.LeaseID(t)
 	group := mtestutil.AppManifestGenerator.Group(t)
+
 	ns := builder.LidNS(lid)
 
 	settings := builder.Settings{
@@ -102,8 +105,16 @@ func TestNewClient(t *testing.T) {
 	assert.NoError(t, err)
 	require.Empty(t, deployments)
 
+	cdep := &ctypes.Deployment{
+		Lid:    lid,
+		MGroup: &group,
+		CParams: crd.ClusterSettings{
+			SchedulerParams: make([]*crd.SchedulerParams, len(group.Services)),
+		},
+	}
+
 	// deploy lease
-	err = ac.Deploy(ctx, lid, &group)
+	err = ac.Deploy(ctx, cdep)
 	assert.NoError(t, err)
 
 	// query deployments, ensure lease present

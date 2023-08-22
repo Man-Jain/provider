@@ -13,7 +13,7 @@ DOCKER_RUN             := docker run --rm -v $(shell pwd):/workspace -w /workspa
 GOLANGCI_LINT_RUN      := $(GOLANGCI_LINT) run
 LINT                    = $(GOLANGCI_LINT_RUN) ./... --disable-all --deadline=5m --enable
 
-GORELEASER_CONFIG       = .goreleaser.yaml
+GORELEASER_CONFIG      ?= .goreleaser.yaml
 
 GIT_HEAD_COMMIT_LONG   := $(shell git log -1 --format='%H')
 GIT_HEAD_COMMIT_SHORT  := $(shell git rev-parse --short HEAD)
@@ -23,7 +23,6 @@ RELEASE_TAG            ?= $(shell git describe --tags --abbrev=0)
 IS_PREREL              := $(shell $(ROOT_DIR)/script/is_prerelease.sh "$(RELEASE_TAG)" && echo "true" || echo "false")
 
 GO_LINKMODE            ?= external
-GO_MOD                 ?= readonly
 BUILD_TAGS             ?= osusergo,netgo,static_build
 GORELEASER_STRIP_FLAGS ?=
 
