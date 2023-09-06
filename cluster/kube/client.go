@@ -15,7 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/apimachinery/pkg/watch"
@@ -116,7 +115,7 @@ func NewClient(ctx context.Context, log log.Logger, ns string, configPath string
 	}, nil
 }
 
-func (c *client) GetDeployments(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.IDeployment, error) {
+func (c *client) GetDeployment(ctx context.Context, dID dtypes.DeploymentID) ([]ctypes.IDeployment, error) {
 	labelSelectors := &strings.Builder{}
 	_, _ = fmt.Fprintf(labelSelectors, "%s=%d", builder.AkashLeaseDSeqLabelName, dID.DSeq)
 	_, _ = fmt.Fprintf(labelSelectors, ",%s=%s", builder.AkashLeaseOwnerLabelName, dID.Owner)
@@ -159,7 +158,7 @@ func (c *client) GetManifestGroup(ctx context.Context, lID mtypes.LeaseID) (bool
 	})
 
 	if err != nil {
-		if kubeErrors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			c.log.Info("CRD manifest not found", "lease-ns", leaseNamespace)
 			return false, crd.ManifestGroup{}, nil
 		}
@@ -309,10 +308,12 @@ func (c *client) Deploy(ctx context.Context, deployment ctypes.IDeployment) (err
 		return err
 	}
 
-	err = applyManifest(ctx, c.ac, applies.cmanifest)
-	if err != nil {
-		c.log.Error("applying manifest", "err", err, "lease", lid)
-		return err
+	if cdeployment.UpdateManifest() {
+		err = applyManifest(ctx, c.ac, applies.cmanifest)
+		if err != nil {
+			c.log.Error("applying manifest", "err", err, "lease", lid)
+			return err
+		}
 	}
 
 	if err = cleanupStaleResources(ctx, c.kc, lid, group); err != nil {
@@ -762,7 +763,7 @@ func (c *client) leaseExists(ctx context.Context, lid mtypes.LeaseID) error {
 	})
 
 	if err != nil {
-		if kubeErrors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			return kubeclienterrors.ErrLeaseNotFound
 		}
 
